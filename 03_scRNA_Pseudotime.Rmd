@@ -1,0 +1,1655 @@
+---
+title: "03_scRNA_Pseudotime" 
+author: "Joshua G. Medina-Feliciano"
+date: "2024-01-18"
+output: html_document
+---
+
+> This notbook is dependent on previous Rmd files.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '/Users/joshuagmedina/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/08-SCRNA-HGLABv4/')
+```
+
+# 1.0 Setting up environment
+
+-   **1.1 Loading libraries**
+
+```{r}
+
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(DESeq2)
+library(SoupX)
+library(hdf5r)
+library(scCustomize)
+library(DropletUtils)
+library(cowplot)
+library(metap)
+library(scater)
+library(TSCAN)
+library(readr)
+library(RColorBrewer)
+library(patchwork)
+library(tidyverse)
+library(ggnewscale)
+library(reshape2)
+library(pcaMethods)
+library(velocyto.R)
+library(SeuratWrappers)
+library(SeuratDisk)
+library(slingshot)
+library(monocle3)
+library(ggbeeswarm)
+library(BiocGenerics)
+library(tradeSeq)
+
+```
+
+-   **1.2 Set working directory**
+
+```{r}
+
+setwd("/Users/joshuagmedina/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/08-SCRNA-HGLABv4/")
+
+```
+
+-   **1.3 Load Seurat object**
+
+```{r}
+
+#all_tissues_seurat <- readRDS(file = "00_DATA/sobj_tissue_comb_08res.v1.rds")
+
+```
+
+```{r}
+
+clusters_for_col = 0:(13 - 1)
+cluster_colors = setNames(c('#0000FFFF', '#FF0000FF', '#00FF00FF', '#B1CC71FF', '#FF00B6FF', '#005300FF',
+                            '#FFA500','#999999', '#9A4D42FF', '#00FFBEFF', '#783FC1FF',
+                            '#1F9698FF', '#FFACFDFF'), clusters_for_col)
+
+DimPlot(all_tissues_seurat, reduction = "umap", label=T, cols = cluster_colors, pt.size = 1.5) + 
+  guides(x = axis, y = axis, colour = guide_legend(override.aes = list(size=10))) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 18),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.key.size = unit(1, 'cm'),
+        legend.text = element_text(size=20))
+
+```
+
+
+# 2.0 Velocity data
+
+-   Load all loom files from the different 10X runs.
+
+```{r}
+
+loom.m1 <- ReadVelocity(file = "02_COUNTSwoMito/M1/velocyto/M1.loom")
+lm1.obj <- as.Seurat(loom.m1)
+
+loom.m2 <- ReadVelocity(file = "02_COUNTSwoMito/M2/velocyto/M2.loom")
+lm2.obj <- as.Seurat(loom.m2)
+
+loom.r1 <- ReadVelocity(file = "02_COUNTSwoMito/R1/velocyto/R1.loom")
+lr1.obj <- as.Seurat(loom.r1)
+
+loom.r2 <- ReadVelocity(file = "02_COUNTSwoMito/R2/velocyto/R2.loom")
+lr2.obj <- as.Seurat(loom.r2)
+
+```
+
+-   Generate a merged seurat object with all the loom data.
+
+```{r}
+
+ldata.merged <- merge(x = lm1.obj, y = c(lm2.obj,lr1.obj, lr2.obj), merge.data = TRUE)
+
+library(stringr) # For str_length and str_remove functions
+
+TransferNames <- function(loom_names){
+  # Step 1: Substitute 'x' at the end based on prefix and create loom_names.tmp
+  loom_names.tmp <- sapply(loom_names, function(name) {
+    if(grepl("^M1:.*x$", name)) {
+      return(sub("x$", "-1_1", name))
+    } else if(grepl("^M2:.*x$", name)) {
+      return(sub("x$", "-1_2", name))
+    } else if(grepl("^R1:.*x$", name)) {
+      return(sub("x$", "-1_3", name))
+    } else if(grepl("^R2:.*x$", name)) {
+      return(sub("x$", "-1_4", name))
+    } else {
+      return(name) # Return name as-is if none of the conditions are met
+    }
+  })
+  
+  # Step 2: Remove every substring prior to ':' symbol including ':' and create loom_names.new
+  loom_names.new <- sapply(loom_names.tmp, function(name) {
+    sub(".*:", "", name)
+  })
+  
+  return(loom_names.new)
+}
+
+
+# Used for previous pipeline.
+# TransferNames = function(loom_names){
+#   loom_names.tmp <- gsub(":","_",loom_names)
+#   loom_names.new <- paste0(substring(loom_names.tmp,1,(str_length(loom_names.tmp)-1)),"-1")
+#   return(loom_names.new)
+# }
+
+ldata.merged <- RenameCells(ldata.merged,
+                     new.names = TransferNames(colnames(ldata.merged)))
+
+
+spliced <- CreateAssayObject(GetAssayData(ldata.merged, assay = "spliced"))
+unspliced <- CreateAssayObject(GetAssayData(ldata.merged, assay = "unspliced"))
+ambiguous <- CreateAssayObject(GetAssayData(ldata.merged, assay = "ambiguous"))
+
+```
+
+## 2.1 Integreate to original seurat oject
+
+```{r}
+# assign to new variable 
+all.combined.velo <- all_tissues_seurat
+
+all.combined.velo[["spliced"]] <- spliced
+all.combined.velo[["unspliced"]] <- unspliced
+all.combined.velo[["ambiguous"]] <- ambiguous
+
+
+```
+
+## 2.2 Run Velocity
+
+```{r}
+
+all.combined.velo <- RunVelocity(all.combined.velo,deltaT = 1, kCells = 25, fit.quantile = 0.02)
+
+```
+
+## 2.3 Visualization of Velocity
+
+```{r}
+
+ident.colors <- (scales::hue_pal())(n = length(x = levels(x = all.combined.velo)))
+names(x = ident.colors) <- levels(x = all.combined.velo)
+cell.colors <- ident.colors[Idents(object = all.combined.velo)]
+names(x = cell.colors) <- colnames(x = all.combined.velo)
+show.velocity.on.embedding.cor(emb = Embeddings(object = all.combined.velo, reduction = "umap"), 
+                               vel = Tool(object = all.combined.velo, 
+    slot = "RunVelocity"), n = 200, scale = "sqrt", cell.colors = ac(x = cell.colors, alpha = 0.5), 
+    cex = 0.8, arrow.scale = 3, show.grid.flow = TRUE, min.grid.cell.mass = 0.5, grid.n = 40, arrow.lwd = 2, 
+    do.par = FALSE, cell.border.alpha = 0.1, yaxt="n", xaxt="n", axes = FALSE)
+
+```
+
+# 3.0 Subseting for Velocity Analysis
+
+```{r}
+
+all.combined.vSubset <- all_tissues_seurat
+
+all.combined.vSubset[["spliced"]] <- spliced
+all.combined.vSubset[["unspliced"]] <- unspliced
+all.combined.vSubset[["ambiguous"]] <- ambiguous
+
+all.combined.vSubset <- subset(x = all.combined.vSubset, idents = c(0, 1, 3, 4, 5, 9))
+
+# Adding metadata to keep the original cluster number
+
+all.combined.vSubset$orig_cluster.0.5 <- all.combined.vSubset$seurat_clusters
+DefaultAssay(all.combined.vSubset) <- "integrated"
+
+
+```
+
+```{r}
+
+VlnPlot(all.combined.vSubset, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2, group.by = "orig.ident")
+#all.combined.vSubset <- subset(all.combined.vSubset, subset = nFeature_RNA > 50 & nFeature_RNA < 7500 & nCount_RNA < 30000)
+#VlnPlot(all.combined.vSubset, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2, group.by = "orig.ident")
+
+```
+
+
+```{r}
+
+all.combined.vSubset <- ScaleData(all.combined.vSubset)
+#all.combined.vSubset <- FindVariableFeatures(all.combined.vSubset, nfeatures = 2000)
+all.combined.vSubset <- RunPCA(all.combined.vSubset, npcs = 50)
+
+all.combined.vSubset <- RunUMAP(all.combined.vSubset, dims = 1:25)
+all.combined.vSubset <- FindNeighbors(all.combined.vSubset, dims = 1:25) %>% FindClusters(resolution = 0.5)
+
+
+```
+
+```{r}
+my_cols = brewer.pal(10,"Paired")
+DimPlot(all.combined.vSubset, reduction = "umap", label=T, group.by = 'orig_cluster.0.5', cols=alpha(my_cols,0.66), pt.size=2) +
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "none",
+        plot.title = element_blank()
+        )
+
+DimPlot(all.combined.vSubset, reduction = "umap", label=T, cols=alpha(my_cols,0.66), pt.size=2) +
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "none",
+        plot.title = element_blank()
+        )
+
+```
+## Finding Markers of Subset
+
+```{r}
+
+DefaultAssay(all.combined.vSubset) <- "RNA"
+number_of_clusters <- 8
+
+for (i in 0:(number_of_clusters - 1)) {
+  cluster_marker = FindMarkers(all.combined.vSubset, ident.1 = i)
+  cluster_marker$pct.diff <- cluster_marker$pct.1 - cluster_marker$pct.2
+  
+  # Dynamically naming the data frames
+  df_name <- paste("all.tissues.subset", i, ".markers", sep = "")
+  assign(df_name, cluster_marker)
+}
+
+
+```
+
+```{r}
+
+# Define the range of cluster numbers
+cluster_start <- 0
+cluster_end <- 7
+
+for (cluster_number in cluster_start:cluster_end) {
+  df_name <- paste0("all.tissues.subset", cluster_number, ".markers")
+  final_df_name <- paste0("all.tissues.subset", cluster_number)
+  
+  # Convert row names to a column 'ID'
+  current_df <- data.frame(ID = row.names(get(df_name)), get(df_name), row.names = NULL)
+  
+  # Create an index to match IDs from the current dataframe to the mapping dataframe
+  idx <- match(current_df$ID, human_uniprot.map$AnnotID)
+  
+  # Use the index to add the matching rows from map_ids to the current dataframe
+  # Including handling NA for unmatched rows
+  current_df$GeneSymbol <- ifelse(!is.na(idx), human_uniprot.map$`Gene Symbol`[idx], NA)
+  current_df$UniprotID <- ifelse(!is.na(idx), human_uniprot.map$`Uniprot ID`[idx], NA)
+  current_df$UniprotDescription <- ifelse(!is.na(idx), human_uniprot.map$`Uniprot Description`[idx], NA)
+  
+  # Assign the modified dataframe to the final dataframe name
+  assign(final_df_name, current_df)
+  
+  # Export the final dataframe to CSV
+#  export_path <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/01_MARKERS/", final_df_name, ".csv")
+#  write.csv(get(final_df_name), file = export_path, row.names = FALSE)
+}
+
+```
+
+```{r}
+# First, ensure additional_metadata has unique IDs
+# This example keeps the first occurrence of each ID
+all_uniprot.map <- all_uniprot.map[!duplicated(all_uniprot.map$ID), ]
+
+# Define the range of cluster numbers
+cluster_start <- 0
+cluster_end <- 7
+
+# Loop to add additional metadata to each final dataframe
+for (cluster_number in cluster_start:cluster_end) {
+  final_df_name <- paste0("all.tissues.subset", cluster_number)
+  
+  # Check if the final dataframe exists in the environment
+  if(exists(final_df_name)) {
+    # Retrieve the final dataframe from the previous loop
+    final_df <- get(final_df_name)
+    
+    # Merge the additional metadata into the final dataframe based on the 'ID' column
+    # Using the unique version of additional_metadata
+    updated_final_df <- merge(final_df, all_uniprot.map, by = "ID", all.x = TRUE)
+    
+    # Reassign the updated dataframe back to the same variable name
+    assign(final_df_name, updated_final_df)
+    
+    # Export the updated final dataframe to CSV (overwriting the previous file)
+    # export_path <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/", final_df_name, ".csv")
+    # write.csv(updated_final_df, file = export_path, row.names = FALSE)
+  }
+}
+
+print("All data frames have been updated with additional metadata and exported.")
+
+```
+
+```{r}
+
+library(openxlsx)
+
+# Define the range of cluster numbers
+cluster_start <- 0
+cluster_end <- 7
+
+# Specify the path for the output Excel file
+output_excel_file <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/01_MARKERS/Cluster_Markers_and_Metadata_Annotv4_Integration_20_Subset.xlsx")
+
+# Create a new workbook
+wb <- createWorkbook()
+
+# Loop to add each data frame to a separate sheet in the workbook
+for (cluster_number in cluster_start:cluster_end) {
+  final_df_name <- paste0("all.tissues.subset", cluster_number)
+  
+  # Check if the data frame exists in the environment
+  if(exists(final_df_name)) {
+    # Retrieve the data frame
+    final_df <- get(final_df_name)
+    
+    # Add a sheet to the workbook with the data frame, named by the cluster number
+    addWorksheet(wb, sheetName = paste("Cluster", cluster_number))
+    writeData(wb, sheet = paste("Cluster", cluster_number), x = final_df)
+  }
+}
+
+# Save the workbook to the specified Excel file
+saveWorkbook(wb, file = output_excel_file, overwrite = TRUE)
+
+print(paste("Excel file with cluster data has been saved to", output_excel_file))
+
+
+```
+
+## 3.0.1 Velocity of Subset
+
+```{r}
+
+all.combined.vSubset <- RunVelocity(all.combined.vSubset,deltaT = 1, kCells = 25, fit.quantile = 0.02)
+
+```
+
+```{r}
+
+
+ident.colors <- my_cols #(scales::hue_pal())(n = length(x = levels(x = all.combined.vSubset)))
+names(x = ident.colors) <- levels(x = all.combined.vSubset)
+cell.colors <- ident.colors[all.combined.vSubset$orig_cluster.0.5]
+names(x = cell.colors) <- colnames(x = all.combined.vSubset)
+show.velocity.on.embedding.cor(emb = Embeddings(object = all.combined.vSubset, reduction = "umap"), 
+                               vel = Tool(object = all.combined.vSubset, 
+    slot = "RunVelocity"), n = 200, scale = "sqrt", cell.colors = ac(x = cell.colors, alpha = 0.5), 
+    cex = 0.8, arrow.scale = 3, show.grid.flow = TRUE, min.grid.cell.mass = 0.5, grid.n = 40, arrow.lwd = 2, 
+    do.par = FALSE, cell.border.alpha = 0.1, yaxt="n", xaxt="n", axes = FALSE)
+
+
+```
+
+# 3.1 Subseting Rudiment Cells for Velocity Analysis
+
+```{r}
+
+all.combined.vrudiment <- all_tissues_seurat
+
+all.combined.vrudiment[["spliced"]] <- spliced
+all.combined.vrudiment[["unspliced"]] <- unspliced
+all.combined.vrudiment[["ambiguous"]] <- ambiguous
+
+all.combined.vrudiment <- subset(x = all.combined.vrudiment, subset = tissue == 'Rudiment', idents = c(0, 1, 3, 4))
+
+# Adding metadata to keep the original cluster number
+
+all.combined.vrudiment$orig_cluster.0.5 <- all.combined.vrudiment$seurat_clusters
+DefaultAssay(all.combined.vrudiment) <- "integrated"
+
+
+```
+
+```{r}
+
+VlnPlot(all.combined.vrudiment, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2, group.by = "orig.ident")
+
+```
+
+```{r}
+
+all.combined.vrudiment <- subset(all.combined.vrudiment, subset = nFeature_RNA > 50 & nFeature_RNA < 7500 & nCount_RNA < 30000)
+
+```
+
+
+
+```{r}
+
+all.combined.vrudiment <- ScaleData(all.combined.vrudiment)
+all.combined.vrudiment <- FindVariableFeatures(all.combined.vrudiment, nfeatures = 1000)
+all.combined.vrudiment <- RunPCA(all.combined.vrudiment, npcs = 50)
+
+all.combined.vrudiment <- RunUMAP(all.combined.vrudiment, dims = 1:25)
+all.combined.vrudiment <- FindNeighbors(all.combined.vrudiment, dims = 1:25) %>% FindClusters(resolution = 0.5)
+
+
+```
+
+```{r}
+my_cols = brewer.pal(10,"Paired")
+DimPlot(all.combined.vrudiment, reduction = "umap", label=F, group.by = 'orig_cluster.0.5', cols=alpha(my_cols,0.66), pt.size=2) +
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_blank()
+        )
+
+DimPlot(all.combined.vrudiment, reduction = "umap", label=F, cols=alpha(my_cols,0.66), pt.size=2) +
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_blank()
+        )
+
+```
+
+## 3.1.1 Velocity of Subset
+
+```{r}
+
+all.combined.vrudiment <- RunVelocity(all.combined.vrudiment,deltaT = 1, kCells = 25, fit.quantile = 0.02)
+
+```
+
+```{r}
+
+
+ident.colors <- my_cols #(scales::hue_pal())(n = length(x = levels(x = all.combined.vSubset)))
+names(x = ident.colors) <- levels(x = all.combined.vrudiment)
+cell.colors <- ident.colors[all.combined.vrudiment$orig_cluster.0.5]
+names(x = cell.colors) <- colnames(x = all.combined.vrudiment)
+show.velocity.on.embedding.cor(emb = Embeddings(object = all.combined.vrudiment, reduction = "umap"), 
+                               vel = Tool(object = all.combined.vrudiment, 
+    slot = "RunVelocity"), n = 200, scale = "sqrt", cell.colors = ac(x = cell.colors, alpha = 0.5), 
+    cex = 0.8, arrow.scale = 3, show.grid.flow = TRUE, min.grid.cell.mass = 0.5, grid.n = 40, arrow.lwd = 2, 
+    do.par = FALSE, cell.border.alpha = 0.1, yaxt="n", xaxt="n", axes = FALSE)
+
+
+```
+
+
+# Slingshot Main Cluster (DOES NOT WORK)
+
+```{r}
+
+main_clusters_seurat_subset <- all_tissues_seurat
+
+main_clusters_seurat_subset[["spliced"]] <- spliced
+main_clusters_seurat_subset[["unspliced"]] <- unspliced
+main_clusters_seurat_subset[["ambiguous"]] <- ambiguous
+
+main_clusters_seurat_subset <- subset(x = main_clusters_seurat_subset, idents = c(0, 1, 3, 4, 5, 9))
+
+# Adding metadata to keep the original cluster number
+
+main_clusters_seurat_subset$orig_cluster.0.5 <- main_clusters_seurat_subset$seurat_clusters
+DefaultAssay(main_clusters_seurat_subset) <- "integrated"
+
+
+```
+
+```{r}
+
+main_clusters_seurat_subset <- ScaleData(main_clusters_seurat_subset)
+main_clusters_seurat_subset <- RunPCA(main_clusters_seurat_subset, npcs = 50)
+
+main_clusters_seurat_subset <- RunUMAP(main_clusters_seurat_subset, dims = 1:25)
+main_clusters_seurat_subset <- FindNeighbors(main_clusters_seurat_subset, dims = 1:25) %>% FindClusters(resolution = 0.5)
+
+
+```
+
+```{r}
+my_cols = brewer.pal(10,"Paired")
+DimPlot(main_clusters_seurat_subset, reduction = "umap", label=T, group.by = 'orig_cluster.0.5', cols=alpha(my_cols,0.66), pt.size=2) +
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "none",
+        plot.title = element_blank()
+        )
+
+```
+
+```{r}
+
+
+gene_annotation.main <- as.data.frame(rownames(main_clusters_seurat_subset@reductions[["pca"]]@feature.loadings),
+                                 row.names = rownames(main_clusters_seurat_subset@reductions[["pca"]]@feature.loadings))
+colnames(gene_annotation.main) <- "gene_short_name"
+
+
+```
+
+```{r}
+
+cell_metadata.main <- as.data.frame(main_clusters_seurat_subset@assays[["RNA"]]@counts@Dimnames[[2]],
+                               row.names = main_clusters_seurat_subset@assays[["RNA"]]@counts@Dimnames[[2]])
+
+
+```
+
+```{r}
+
+colnames(cell_metadata.main) <- "barcode"
+
+```
+
+```{r}
+
+New_matrix.main <- main_clusters_seurat_subset@assays[["RNA"]]@counts
+New_matrix.main <- New_matrix.main[rownames(main_clusters_seurat_subset@reductions[["pca"]]@feature.loadings), ]
+expression_matrix.main <- New_matrix.main
+
+
+```
+
+```{r}
+
+cds_from_seurat.main <- new_cell_data_set(expression_matrix.main,
+                                     cell_metadata = cell_metadata.main,
+                                     gene_metadata = gene_annotation.main)
+
+```
+
+
+```{r}
+
+recreate.partition.main <- c(rep(1, length(cds_from_seurat.main@colData@rownames)))
+names(recreate.partition.main) <- cds_from_seurat.main@colData@rownames
+recreate.partition.main <- as.factor(recreate.partition.main)
+
+
+```
+
+```{r}
+
+cds_from_seurat.main@clusters@listData[["UMAP"]][["partitions"]] <- recreate.partition.main
+
+```
+
+```{r}
+
+list_cluster.main <- main_clusters_seurat_subset$seurat_clusters
+names(list_cluster.main) <- main_clusters_seurat_subset@assays[["RNA"]]@data@Dimnames[[2]]
+
+```
+
+```{r}
+
+cds_from_seurat.main@clusters@listData[["UMAP"]][["clusters"]] <- list_cluster.main
+
+```
+
+```{r}
+
+cds_from_seurat.main@clusters@listData[["UMAP"]][["louvain_res"]] <- "NA"
+
+```
+
+```{r}
+
+cds_from_seurat.main@int_colData@listData$reducedDims@listData[["UMAP"]] <-main_clusters_seurat_subset@reductions[["umap"]]@cell.embeddings
+
+```
+
+```{r}
+
+cds_from_seurat.main@reduce_dim_aux$gene_loadings <- main_clusters_seurat_subset@reductions[["pca"]]@feature.loadings
+
+```
+
+## Generating Pseudotime
+
+```{r}
+
+clusters_main_info <- main_clusters_seurat_subset$orig_cluster.0.5
+
+slingshot_sce.main <- slingshot::slingshot(cds_from_seurat.main, clusterLabels = clusters_main_info, reducedDim = "UMAP",
+                                   allow.breaks = FALSE)#, start.clus = 0)
+
+```
+
+```{r}
+
+head(slingshot_sce.main$slingPseudotime_1)
+
+```
+
+```{r}
+
+
+lnes.main <- getLineages(reducedDim(slingshot_sce.main,"UMAP"),
+                    main_clusters_seurat_subset$orig_cluster.0.5)
+
+lnes.main@metadata$lineages
+
+```
+
+```{r}
+my_color <- c(brewer.pal(8,"Dark2"), "grey")
+names(my_color) <- unique(as.character(main_clusters_seurat_subset$orig_cluster.0.5))
+
+plot(reducedDims(slingshot_sce.main)$UMAP, col = my_color[as.character(main_clusters_seurat_subset$orig_cluster.0.5)], 
+     pch=16, 
+     asp = 1)
+legend("bottomright",legend = names(my_color[levels(main_clusters_seurat_subset$orig_cluster.0.5)]),  
+       fill = my_color[levels(main_clusters_seurat_subset$orig_cluster.0.5)])
+lines(SlingshotDataSet(slingshot_sce.main), lwd=2, type = 'lineages', col = c("black"))
+
+```
+
+```{r}
+
+pseudo.paths.main <- slingPseudotime(slingshot_sce.main)
+head(pseudo.paths.main)
+
+```
+
+```{r}
+
+# Step 1: Convert factor to data frame with cell IDs and their corresponding values
+factor_df.main <- data.frame(CellID = names(clusters_main_info),
+                        ClusterID = as.character(clusters_main_info))
+head(factor_df.main)
+# Step 2: Ensure the data frame has row names in a column (if not already)
+# This step might not be necessary if your data frame already treats row names correctly
+pseudo.paths.df.main <- as.data.frame(pseudo.paths.main)
+pseudo.paths.df.main$CellID <- rownames(pseudo.paths.df.main)
+head(pseudo.paths.df.main)
+# Step 3: Match and merge the factor values into the umap data frame
+# This uses a merge operation to find matching CellIDs and add the FactorValue
+final_df.main <- inner_join(pseudo.paths.df.main, factor_df.main, by = "CellID")
+# The final_df now contains UMAP_1, UMAP_2, and the matched FactorValue for each CellID
+# Optionally, if you want to handle cells in umap_df that don't have a match in cell_factor,
+# you might want to fill NA values in FactorValue column with a default value or handle them as needed.
+
+# View the final data frame to confirm
+head(final_df.main)
+
+
+# Assuming final_df is your data frame
+# Step 1: Calculate median of Lineage1 for each FactorValue
+factor_order.main <- final_df.main %>%
+  group_by(ClusterID) %>%
+  summarise(MedianLineage1 = median(Lineage1, na.rm = TRUE)) %>%
+  arrange(MedianLineage1) %>%
+  pull(ClusterID)
+
+# Step 2: Convert FactorValue to an ordered factor based on the calculated order
+final_df.main$ClusterID <- factor(final_df.main$ClusterID, levels = factor_order.main)
+
+
+```
+
+
+
+```{r}
+
+ggplot(final_df.main, aes(x = Lineage1, y = ClusterID, 
+                          colour = ClusterID)) +
+  geom_quasirandom(groupOnX = FALSE, orientation = "y", alpha=0.66) + theme_classic() +
+  theme(legend.text=element_text(size=14),
+        panel.grid.major.y = element_line(color = "grey90",
+                                          size = 0.2,
+                                          linetype = 2)) +
+  guides(color = guide_legend(override.aes = list(size = 6))) +
+  xlab("First Slingshot pseudotime") + ylab("cluster") +
+  ggtitle("Cells ordered by Slingshot pseudotime")+scale_colour_manual(values = my_color)
+
+ggplot(final_df.main, aes(x = Lineage2, y = ClusterID, 
+                          colour = ClusterID)) +
+  geom_quasirandom(groupOnX = FALSE, orientation = "y", alpha=0.66) + theme_classic() +
+  theme(legend.text=element_text(size=14),
+        panel.grid.major.y = element_line(color = "grey90",
+                                          size = 0.2,
+                                          linetype = 2)) +
+  guides(color = guide_legend(override.aes = list(size = 6))) +
+  xlab("First Slingshot pseudotime") + ylab("cluster") +
+  ggtitle("Cells ordered by Slingshot pseudotime")+scale_colour_manual(values = my_color)
+
+ggplot(final_df.main, aes(x = Lineage3, y = ClusterID, 
+                          colour = ClusterID)) +
+  geom_quasirandom(groupOnX = FALSE, orientation = "y", alpha=0.66) + theme_classic() +
+  theme(legend.text=element_text(size=14),
+        panel.grid.major.y = element_line(color = "grey90",
+                                          size = 0.2,
+                                          linetype = 2)) +
+  guides(color = guide_legend(override.aes = list(size = 6))) +
+  xlab("First Slingshot pseudotime") + ylab("cluster") +
+  ggtitle("Cells ordered by Slingshot pseudotime")+scale_colour_manual(values = my_color)
+```
+
+```{r}
+
+ggplot(final_df.main, aes(x = Lineage1, y = Lineage2, colour = ClusterID)) +
+  geom_quasirandom(groupOnX = FALSE, orientation = "y", alpha = 0.8) + theme_classic() +
+  theme(legend.text=element_text(size=14)) +
+  guides(color = guide_legend(override.aes = list(size = 6))) +
+  xlab("First Slingshot pseudotime") + ylab("Second Slingshot pseudotime") +
+  ggtitle("Cells ordered by Slingshot pseudotime")+scale_colour_manual(values = my_color)
+
+```
+
+```{r}
+
+slingshot_sce.main
+
+n <- ncol(slingshot_sce.main)
+L <- ncol(slingPseudotime(slingshot_sce.main))
+plot(as.numeric(slingPseudotime(slingshot_sce.main)), jitter(rep(1:L, each=n)), pch=16, col = my_color[as.character(main_clusters_seurat_subset$orig_cluster.0.5)])
+
+```
+
+
+# Monocle3 (DOES NOT WORK)
+
+```{r}
+
+gene_annotation.monocle1 <- as.data.frame(rownames(main_clusters_seurat_subset@reductions[["pca"]]@feature.loadings),
+                                 row.names = rownames(main_clusters_seurat_subset@reductions[["pca"]]@feature.loadings))
+colnames(gene_annotation.monocle1) <- "gene_short_name"
+
+
+```
+
+```{r}
+
+cell_metadata.monocle1 <- as.data.frame(main_clusters_seurat_subset@assays[["RNA"]]@counts@Dimnames[[2]],
+                               row.names = main_clusters_seurat_subset@assays[["RNA"]]@counts@Dimnames[[2]])
+
+
+```
+
+```{r}
+
+colnames(cell_metadata.monocle1) <- "barcode"
+
+```
+
+
+```{r}
+
+New_matrix.monocle1 <- main_clusters_seurat_subset@assays[["RNA"]]@counts
+New_matrix.monocle1 <- New_matrix.monocle1[rownames(main_clusters_seurat_subset@reductions[["pca"]]@feature.loadings), ]
+expression_matrix.monocle1 <- New_matrix.monocle1
+
+
+```
+
+```{r}
+
+cds_from_seurat.monocle1 <- new_cell_data_set(expression_matrix.monocle1,
+                                     cell_metadata = cell_metadata.monocle1,
+                                     gene_metadata = gene_annotation.monocle1)
+
+```
+
+
+```{r}
+
+recreate.partition.monocle1 <- c(rep(1, length(cds_from_seurat.monocle1@colData@rownames)))
+names(recreate.partition.monocle1) <- cds_from_seurat.monocle1@colData@rownames
+recreate.partition.monocle1 <- as.factor(recreate.partition.monocle1)
+
+
+```
+
+```{r}
+
+cds_from_seurat.monocle1@clusters@listData[["UMAP"]][["partitions"]] <- recreate.partition.monocle1
+
+```
+
+```{r}
+
+list_cluster.monocle1 <- main_clusters_seurat_subset$seurat_clusters
+names(list_cluster.monocle1) <- main_clusters_seurat_subset@assays[["RNA"]]@data@Dimnames[[2]]
+
+```
+
+```{r}
+
+cds_from_seurat.monocle1@clusters@listData[["UMAP"]][["clusters"]] <- list_cluster.monocle1
+
+```
+
+```{r}
+
+cds_from_seurat.monocle1@clusters@listData[["UMAP"]][["louvain_res"]] <- "NA"
+
+```
+
+```{r}
+
+cds_from_seurat.monocle1@int_colData@listData$reducedDims@listData[["UMAP"]] <-main_clusters_seurat_subset@reductions[["umap"]]@cell.embeddings
+
+```
+
+```{r}
+
+cds_from_seurat.monocle1@reduce_dim_aux$gene_loadings <- main_clusters_seurat_subset@reductions[["pca"]]@feature.loadings
+
+```
+
+```{r}
+
+cds_from_seurat.monocle1 <- learn_graph(cds_from_seurat.monocle1, use_partition = F)
+
+plot_cells(cds_from_seurat.monocle1, 
+                   color_cells_by = 'cluster',
+                   label_groups_by_cluster=TRUE,
+                   label_leaves=FALSE,
+                   label_branch_points=TRUE,
+           graph_label_size=5)
+
+
+```
+
+
+```{r}
+
+order_cells(cds_from_seurat.monocle1, reduction_method = 'UMAP', root_pr_nodes = colnames(main_clusters_seurat_subset[,main_clusters_seurat_subset$orig_cluster.0.5 == 5]))
+
+plot_cells(cds_from_seurat.monocle1,
+           color_cells_by = 'pseudotime',
+           label_groups_by_cluster=TRUE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE,
+           label_roots = FALSE)
+
+head(pseudotime(cds_from_seurat.monocle1))
+
+
+```
+
+
+
+# 4.0 Monocle3 Main Cluster Subset
+- Subset of main clusters but without cluster 8. 
+
+```{r}
+
+main_clust_seurat <- main_clusters_seurat_subset
+
+DefaultAssay(main_clust_seurat) <- "RNA"
+test.sce <- as.SingleCellExperiment(main_clust_seurat)
+
+
+```
+
+```{r}
+
+gene_meta <- rowData(test.sce)
+gene_meta$gene_short_name  <- rownames(gene_meta)
+test.cds <- new_cell_data_set(expression_data = counts(test.sce),
+                         cell_metadata = colData(test.sce),
+                         gene_metadata = gene_meta)
+
+```
+
+
+```{r}
+
+test.cds <- preprocess_cds(test.cds,num_dim = 20)
+plot_pc_variance_explained(test.cds)
+
+test.cds <- reduce_dimension(test.cds)
+
+```
+
+
+```{r}
+
+## Step 4: Cluster the cells
+test.cds <- cluster_cells(test.cds)
+
+## change the clusters
+
+test.cds@clusters$UMAP$clusters <- main_clusters_seurat_subset$orig_cluster.0.5
+
+## Step 5: Learn a graph
+test.cds <- learn_graph(test.cds,use_partition = FALSE)
+
+## Step 6: Order cells
+test.cds <- order_cells(test.cds, root_cells = colnames(main_clusters_seurat_subset[,main_clusters_seurat_subset$orig_cluster.0.5 == 0]))
+
+
+plot_cells(test.cds, color_cells_by="cluster",
+           label_groups_by_cluster=TRUE,
+           label_leaves=FALSE,
+           show_trajectory_graph = FALSE,
+           label_branch_points=FALSE, cell_size = 1, label_roots = FALSE,
+           group_label_size = 6) + scale_color_manual(values = my_cols[as.character(main_clusters_seurat_subset$orig_cluster.0.5)])
+
+
+plot_cells(test.cds,
+           label_groups_by_cluster=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE, 
+           cell_size = 1, 
+           label_roots = FALSE,
+           show_trajectory_graph = FALSE,
+           color_cells_by="pseudotime",
+           trajectory_graph_color = "grey60")
+
+```
+
+```{r}
+
+pdata_cds <- pData(test.cds)
+pdata_cds$pseudotime_monocle3 <- monocle3::pseudotime(test.cds)
+
+ggplot(as.data.frame(pdata_cds), 
+       aes(x = pseudotime_monocle3, 
+           y = main_clusters_seurat_subset$orig_cluster.0.5,
+           colour = main_clusters_seurat_subset$orig_cluster.0.5)) +
+    geom_quasirandom(groupOnX = FALSE) +
+    scale_color_manual(values = my_color) + theme_classic() +
+  theme(legend.text=element_text(size=14)) + labs(colour = "Clusters")  +
+  guides(color = guide_legend(override.aes = list(size = 6))) +
+    xlab("monocle3 pseudotime") + ylab("Timepoint") +
+    ggtitle("Cells ordered by monocle3 pseudotime")
+
+```
+
+## 4.1 Monocle3 Main Cluster Subset
+- Subset of rudiment main clusters without cluster 8. 
+
+```{r}
+
+main_clust_seurat <- all.combined.vrudiment
+
+DefaultAssay(main_clust_seurat) <- "RNA"
+test.sce <- as.SingleCellExperiment(main_clust_seurat)
+
+
+```
+
+```{r}
+
+gene_meta <- rowData(test.sce)
+gene_meta$gene_short_name  <- rownames(gene_meta)
+test.cds <- new_cell_data_set(expression_data = counts(test.sce),
+                         cell_metadata = colData(test.sce),
+                         gene_metadata = gene_meta)
+
+```
+
+
+```{r}
+
+test.cds <- preprocess_cds(test.cds,num_dim = 20)
+plot_pc_variance_explained(test.cds)
+
+test.cds <- reduce_dimension(test.cds)
+
+```
+
+
+```{r}
+
+## Step 4: Cluster the cells
+test.cds <- cluster_cells(test.cds)
+
+## change the clusters
+
+test.cds@clusters$UMAP$clusters <- all.combined.vrudiment$orig_cluster.0.5
+
+## Step 5: Learn a graph
+test.cds <- learn_graph(test.cds,use_partition = FALSE)
+
+## Step 6: Order cells
+test.cds <- order_cells(test.cds, root_cells = colnames(all.combined.vrudiment[,all.combined.vrudiment$orig_cluster.0.5 == 1]))
+
+
+plot_cells(test.cds, color_cells_by="cluster",
+           label_groups_by_cluster=TRUE,
+           label_leaves=FALSE,
+           show_trajectory_graph = FALSE,
+           label_branch_points=FALSE, cell_size = 1, label_roots = FALSE,
+           group_label_size = 6) + scale_color_manual(values = my_cols[as.character(all.combined.vrudiment$orig_cluster.0.5)])
+
+
+plot_cells(test.cds,
+           label_groups_by_cluster=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE, 
+           cell_size = 1, 
+           label_roots = FALSE,
+           show_trajectory_graph = FALSE,
+           color_cells_by="pseudotime",
+           trajectory_graph_color = "grey60")
+
+```
+
+```{r}
+
+pdata_cds <- pData(test.cds)
+pdata_cds$pseudotime_monocle3 <- monocle3::pseudotime(test.cds)
+
+ggplot(as.data.frame(pdata_cds), 
+       aes(x = pseudotime_monocle3, 
+           y = all.combined.vrudiment$orig_cluster.0.5,
+           colour = all.combined.vrudiment$orig_cluster.0.5)) +
+    geom_quasirandom(groupOnX = FALSE) +
+    scale_color_manual(values = cluster_colors) + theme_classic() +
+  theme(legend.text=element_text(size=14)) + labs(colour = "Clusters")  +
+  guides(color = guide_legend(override.aes = list(size = 6))) +
+    xlab("monocle3 pseudotime") + ylab("Timepoint") +
+    ggtitle("Cells ordered by monocle3 pseudotime")
+
+```
+
+# 5.0 Slingshot Subset wo. 8,2,7
+
+```{r}
+
+test.slingshot.sce <- as.SingleCellExperiment(main_clust_seurat, assay = 'RNA')
+
+```
+
+```{r}
+
+test.slingshot.sce <- slingshot::slingshot(test.slingshot.sce, clusterLabels = clusters_main_info,reducedDim = "PCA",
+                      allow.breaks = FALSE)
+
+```
+
+```{r}
+
+lnes <- getLineages(reducedDim(test.slingshot.sce,"PCA"),
+                    main_clust_seurat$orig_cluster.0.5)
+
+lnes@metadata$lineages
+
+```
+
+
+```{r}
+
+my_color <- c(brewer.pal(8,"Dark2"), "grey")
+names(my_color) <- unique(as.character(main_clusters_seurat_subset$orig_cluster.0.5))
+
+plot(reducedDims(slingshot_sce.main)$UMAP, col = my_color[as.character(main_clusters_seurat_subset$orig_cluster.0.5)], 
+     pch=16, 
+     asp = 1)
+legend("bottomleft",legend = names(my_color[levels(main_clusters_seurat_subset$orig_cluster.0.5)]),  
+       fill = my_color[levels(main_clusters_seurat_subset$orig_cluster.0.5)])
+lines(SlingshotDataSet(slingshot_sce.main), lwd=2, type = 'lineages', col = c("black"))
+
+
+
+
+plot(reducedDims(test.slingshot.sce)$PCA, col = my_color[as.character(test.slingshot.sce$orig_cluster.0.5)], 
+     pch=16, 
+     asp = 1)
+legend("bottomleft",legend = names(my_color[levels(test.slingshot.sce$orig_cluster.0.5)]),  
+       fill = my_color[levels(test.slingshot.sce$orig_cluster.0.5)])
+lines(SlingshotDataSet(test.slingshot.sce), lwd=2, type = 'lineages', col = c("black"))
+
+
+
+```
+
+```{r}
+
+pseudo.paths.test <- slingPseudotime(test.slingshot.sce)
+head(pseudo.paths.test)
+
+```
+
+```{r}
+
+# Step 1: Convert factor to data frame with cell IDs and their corresponding values
+factor_df.test <- data.frame(CellID = names(clusters_main_info),
+                        ClusterID = as.character(clusters_main_info))
+head(factor_df.test)
+# Step 2: Ensure the data frame has row names in a column (if not already)
+# This step might not be necessary if your data frame already treats row names correctly
+pseudo.paths.df.test <- as.data.frame(pseudo.paths.test)
+pseudo.paths.df.test$CellID <- rownames(pseudo.paths.df.test)
+head(pseudo.paths.df.test)
+# Step 3: Match and merge the factor values into the umap data frame
+# This uses a merge operation to find matching CellIDs and add the FactorValue
+final_df.test <- inner_join(pseudo.paths.df.test, factor_df.test, by = "CellID")
+# The final_df now contains UMAP_1, UMAP_2, and the matched FactorValue for each CellID
+# Optionally, if you want to handle cells in umap_df that don't have a match in cell_factor,
+# you might want to fill NA values in FactorValue column with a default value or handle them as needed.
+
+# View the final data frame to confirm
+head(final_df.test)
+
+
+# Assuming final_df is your data frame
+# Step 1: Calculate median of Lineage1 for each FactorValue
+factor_order.test <- final_df.test %>%
+  group_by(ClusterID) %>%
+  summarise(MedianLineage1 = median(Lineage1, na.rm = TRUE)) %>%
+  arrange(MedianLineage1) %>%
+  pull(ClusterID)
+
+# Step 2: Convert FactorValue to an ordered factor based on the calculated order
+final_df.test$ClusterID <- factor(final_df.test$ClusterID, levels = factor_order.test)
+
+
+```
+
+
+
+```{r}
+
+ggplot(final_df.test, aes(x = Lineage1, y = Lineage2, 
+                          colour = ClusterID)) +
+  geom_quasirandom(groupOnX = FALSE, orientation = "y", alpha=0.9) + theme_classic() +
+  theme(legend.text=element_text(size=14),
+        panel.grid.major.y = element_line(color = "grey90",
+                                          size = 0.2,
+                                          linetype = 2)) +
+  guides(color = guide_legend(override.aes = list(size = 6))) +
+  xlab("First Slingshot pseudotime") + ylab("Second Slingshot pseudotime") +
+  ggtitle("Cells ordered by Slingshot pseudotime")+scale_colour_manual(values = my_cols)
+
+
+```
+
+
+```{r}
+
+lin <- getLineages(reducedDim(test.slingshot.sce,"PCA"),
+                    test.slingshot.sce$orig_cluster.0.5)
+
+lin@metadata$lineages
+
+data("slingshotExample")
+rd <- reducedDim(test.slingshot.sce,"PCA")[,1:2]
+cl <- test.slingshot.sce$orig_cluster.0.5
+
+
+plot(reducedDims(test.slingshot.sce)$UMAP, asp=1, col = 'grey75', pch = 16)
+points(reducedDims(test.slingshot.sce)$UMAP, col = hcl.colors(100)[cut(slingPseudotime(test.slingshot.sce)[,1], 100)], pch = 16)
+legend('topleft', title = 'Lineage 1', col = hcl.colors(3), legend=c('0%','50%','100%'), pch=16)
+
+plot(reducedDims(test.slingshot.sce)$UMAP, col = brewer.pal(9,"Set1")[test.slingshot.sce$orig_cluster.0.5], asp = 1, pch = 16)
+lines(SlingshotDataSet(lin), lwd = 3, col = 'black')
+
+
+```
+
+```{r}
+
+plot(rd, col = my_cols[test.slingshot.sce$orig_cluster.0.5], asp = 1, pch = 16)
+lines(SlingshotDataSet(lin), lwd = 3, col = 'black')
+
+```
+
+
+```{r}
+my_cols <- c(brewer.pal(10,"Paired"), "grey")
+names(my_cols) <- unique(as.character(test.slingshot.sce$orig_cluster.0.5))
+
+n <- ncol(test.slingshot.sce)
+L <- ncol(slingPseudotime(test.slingshot.sce))
+plot(as.numeric(slingPseudotime(test.slingshot.sce)), jitter(rep(1:L, each=n)),pch=16, col = my_cols[as.character(test.slingshot.sce$orig_cluster.0.5)])
+legend("topleft", legend=unique(test.slingshot.sce$orig_cluster.0.5), title="Group", col = my_cols[as.character(test.slingshot.sce$orig_cluster.0.5)], pch = 16, cex = 1.2)
+
+library(ggplot2)
+
+# Assuming 'test.slingshot.sce' is your SingleCellExperiment object
+# and it contains a column 'orig_cluster.0.5' for cluster IDs.
+# 'L' would be the number of lineages detected by slingshot.
+
+# Extract pseudotime and cluster information
+pseudotime <- as.numeric(slingPseudotime(test.slingshot.sce))
+clusters <- test.slingshot.sce$orig_cluster.0.5
+
+# Create a data frame for ggplot
+df <- data.frame(
+  Pseudotime = pseudotime,
+  Lineage = rep(1:L, each = length(pseudotime) / L), # Adjust if you have a different number of cells in each lineage
+  Cluster = factor(clusters),
+  Jitter = jitter(rep(1:L, each = length(pseudotime) / L)) # Same adjustment as above
+)
+
+# Create the plot
+ggplot(df, aes(x = Pseudotime, y = Jitter, color = Cluster)) +
+  geom_point() +
+  scale_color_manual(values = my_cols) +
+  theme(legend.text=element_text(size=14)) + labs(colour = "Clusters")  +
+  guides(color = guide_legend(override.aes = list(size = 6))) +
+  theme_classic() +
+  xlab("Pseudotime") +
+  ylab("Lineage") +
+  scale_y_continuous(breaks = function(limits) seq(from = floor(limits[1]), to = ceiling(limits[2]), by = 1)) # Add this line to adjust y breaks
+  ggtitle("Pseudotime Plot")
+
+
+```
+
+## 5.1 Differential Expression
+
+```{r}
+lin_ss <- getLineages(reducedDim(test.slingshot.sce,"PCA"),
+                    test.slingshot.sce$orig_cluster.0.5)
+
+lin_ss@metadata$lineages
+crv_ss <- getCurves(lin_ss)
+
+```
+
+```{r}
+
+counts_ss <- counts(test.slingshot.sce)
+
+icMat <- evaluateK(counts = counts_ss, sds = crv_ss, k=3:20, nGenes = 200,
+                   verbose=TRUE)
+
+icMat <- evaluateK(counts = counts_ss, k=3:20, nGenes = 200,
+                   pseudotime = slingPseudotime(crv, na = FALSE),
+                   cellWeights = slingCurveWeights(crv))
+
+
+test.slingshot.sce <- fitGAM(test.slingshot.sce)
+
+# test for dynamic expression
+ATres <- associationTest(test.slingshot.sce)
+
+```
+
+
+```{r}
+
+
+rd.test <- reducedDim(test.slingshot.sce,"PCA")[,1:2]
+cl1 <- mclust(rd.test)$classification
+colData(sce)$GMM <- cl1
+
+topgenes <- rownames(ATres[order(ATres$pvalue), ])[1:250]
+pst.ord <- order(test.slingshot.sce$slingPseudotime_1, na.last = NA)
+heatdata <- assays(test.slingshot.sce)$counts[topgenes, pst.ord]
+heatclus <- test.slingshot.sce$GMM[pst.ord]
+
+heatmap(log1p(heatdata), Colv = NA,
+        ColSideColors = brewer.pal(9,"Set1")[heatclus])
+
+```
+
+# 5.1 Slingshot Clusters Subset Rudiment
+
+```{r}
+
+subset_main_rudiment<- all_tissues_seurat
+
+subset_main_rudiment[["spliced"]] <- spliced
+subset_main_rudiment[["unspliced"]] <- unspliced
+subset_main_rudiment[["ambiguous"]] <- ambiguous
+
+subset_main_rudiment <- subset(x = subset_main_rudiment, subset = tissue == 'Rudiment', idents = c(0, 1, 3, 4))
+
+# Adding metadata to keep the original cluster number
+
+subset_main_rudiment$orig_cluster.0.5 <- subset_main_rudiment$seurat_clusters
+DefaultAssay(subset_main_rudiment) <- "integrated"
+
+
+```
+
+```{r}
+
+subset_main_rudiment <- ScaleData(subset_main_rudiment)
+subset_main_rudiment <- RunPCA(subset_main_rudiment, npcs = 50)
+
+subset_main_rudiment <- RunUMAP(subset_main_rudiment, dims = 1:25)
+subset_main_rudiment <- FindNeighbors(subset_main_rudiment, dims = 1:25) %>% FindClusters(resolution = 0.5)
+
+
+```
+
+```{r}
+
+my_cols = brewer.pal(10,"Accent")
+rudiment_subset_wo8 <- DimPlot(subset_main_rudiment, reduction = "umap", label=T, group.by = 'orig_cluster.0.5', cols=alpha(my_cols,0.66), pt.size=2) +
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "none",
+        plot.title = element_blank()
+        )
+rudiment_subset_wo8
+```
+
+```{r}
+
+slingshot_mesentery.v1 <- as.SingleCellExperiment(subset_main_rudiment, assay = 'RNA')
+
+```
+
+```{r}
+clusters_mesentery_info <- subset_main_rudiment$orig_cluster.0.5
+
+slingshot_mesentery.v1 <- slingshot::slingshot(slingshot_mesentery.v1, clusterLabels = clusters_mesentery_info,reducedDim = "PCA",
+                      allow.breaks = FALSE)
+
+```
+
+```{r}
+
+lnes <- getLineages(reducedDim(slingshot_mesentery.v1,"PCA"),
+                    clusters_mesentery_info)
+
+lnes@metadata$lineages
+
+```
+
+```{r}
+
+pseudo.paths.mesentery <- slingPseudotime(slingshot_mesentery.v1)
+head(pseudo.paths.mesentery)
+
+```
+
+```{r}
+my_cols <- c(brewer.pal(10,"Accent"), "grey")
+names(my_cols) <- unique(as.character(slingshot_mesentery.v1$orig_cluster.0.5))
+
+n <- ncol(slingshot_mesentery.v1)
+L <- ncol(slingPseudotime(slingshot_mesentery.v1))
+plot(as.numeric(slingPseudotime(slingshot_mesentery.v1)), jitter(rep(1:L, each=n)),pch=16, col = my_cols[as.character(slingshot_mesentery.v1$orig_cluster.0.5)])
+legend("topleft", legend=unique(slingshot_mesentery.v1$orig_cluster.0.5), title="Group", col = my_cols[as.character(slingshot_mesentery.v1$orig_cluster.0.5)], pch = 16, cex = 1.2)
+
+library(ggplot2)
+
+# Assuming 'test.slingshot.sce' is your SingleCellExperiment object
+# and it contains a column 'orig_cluster.0.5' for cluster IDs.
+# 'L' would be the number of lineages detected by slingshot.
+
+# Extract pseudotime and cluster information
+pseudotime <- as.numeric(slingPseudotime(slingshot_mesentery.v1))
+clusters <- slingshot_mesentery.v1$orig_cluster.0.5
+
+# Create a data frame for ggplot
+df <- data.frame(
+  Pseudotime = pseudotime,
+  Lineage = rep(1:L, each = length(pseudotime) / L), # Adjust if you have a different number of cells in each lineage
+  Cluster = factor(clusters),
+  Jitter = jitter(rep(1:L, each = length(pseudotime) / L)) # Same adjustment as above
+)
+
+# Create the plot
+mesentery_slingshot_pseudotime_jitter <- ggplot(df, aes(x = Pseudotime, y = Jitter, color = Cluster)) +
+  geom_point() +
+  scale_color_manual(values = my_cols) +
+  theme(legend.text=element_text(size=14)) + labs(colour = "Clusters")  +
+  guides(color = guide_legend(override.aes = list(size = 6))) +
+  theme_classic() +
+  xlab("Pseudotime") +
+  ylab("Lineage") +
+  scale_y_continuous(breaks = function(limits) seq(from = floor(limits[1]), to = ceiling(limits[2]), by = 1)) # Add this line to adjust y breaks
+  ggtitle("Pseudotime Plot")
+
+
+
+```
+
+```{r}
+
+lin <- getLineages(reducedDim(slingshot_mesentery.v1,"PCA"),
+                    slingshot_mesentery.v1$orig_cluster.0.5)
+
+lin@metadata$lineages
+
+data("slingshotExample")
+rd <- reducedDim(slingshot_mesentery.v1,"PCA")[,1:2]
+cl <- slingshot_mesentery.v1$orig_cluster.0.5
+
+
+plot(reducedDims(slingshot_mesentery.v1)$UMAP, asp=1, col = 'grey75', pch = 16)
+points(reducedDims(slingshot_mesentery.v1)$UMAP, col = hcl.colors(100)[cut(slingPseudotime(slingshot_mesentery.v1)[,1], 100)], pch = 16)
+legend('topleft', title = 'Lineage 1', col = hcl.colors(3), legend=c('0%','50%','100%'), pch=16)
+```
+
+```{r}
+
+# Assuming cell_factor is your factor variable
+# And umap_df is your data frame
+
+# Step 1: Convert factor to data frame with cell IDs and their corresponding values
+factor_df <- data.frame(CellID = names(cluster_info),
+                        FactorValue = as.character(cluster_info))
+
+# Step 2: Ensure the data frame has row names in a column (if not already)
+# This step might not be necessary if your data frame already treats row names correctly
+pseudo.paths.df <- as.data.frame(pseudo.paths)
+pseudo.paths.df$CellID <- rownames(pseudo.paths.df)
+
+# Step 3: Match and merge the factor values into the umap data frame
+# This uses a merge operation to find matching CellIDs and add the FactorValue
+final_df <- inner_join(pseudo.paths.df, factor_df, by = "CellID")
+# The final_df now contains UMAP_1, UMAP_2, and the matched FactorValue for each CellID
+# Optionally, if you want to handle cells in umap_df that don't have a match in cell_factor,
+# you might want to fill NA values in FactorValue column with a default value or handle them as needed.
+
+# View the final data frame to confirm
+head(final_df)
+
+
+# Assuming final_df is your data frame
+# Step 1: Calculate median of Lineage1 for each FactorValue
+factor_order <- final_df %>%
+  group_by(FactorValue) %>%
+  summarise(MedianLineage1 = median(Lineage1, na.rm = TRUE)) %>%
+  arrange(MedianLineage1) %>%
+  pull(FactorValue)
+
+# Step 2: Convert FactorValue to an ordered factor based on the calculated order
+final_df$FactorValue <- factor(final_df$FactorValue, levels = factor_order)
+
+
+ggplot(final_df, aes(x = Lineage1, y = FactorValue, 
+                              colour = FactorValue)) +
+    geom_quasirandom(groupOnX = FALSE, orientation = "y", alpha=0.66) + theme_classic() +
+    xlab("First Slingshot pseudotime") + ylab("cell type") +
+    ggtitle("Cells ordered by Slingshot pseudotime")+scale_colour_manual(values = my_color)
+
+ggplot(final_df, aes(x = Lineage2, y = FactorValue, 
+                              colour = FactorValue)) +
+    geom_quasirandom(groupOnX = FALSE, orientation = "y", alpha=0.66) + theme_classic() +
+    xlab("Second Slingshot pseudotime") + ylab("cell type") +
+    ggtitle("Cells ordered by Slingshot pseudotime")+scale_colour_manual(values = my_color)
+
+```
+
+
+
+
+# 5.2 Slingshot Clusters Subset Mesentery
+
+```{r}
+
+subset_main_mesentery <- all_tissues_seurat
+
+subset_main_mesentery[["spliced"]] <- spliced
+subset_main_mesentery[["unspliced"]] <- unspliced
+subset_main_mesentery[["ambiguous"]] <- ambiguous
+
+subset_main_mesentery <- subset(x = subset_main_mesentery, subset = tissue == 'Mesentery', idents = c(0, 1, 3, 4, 5, 9))
+
+# Adding metadata to keep the original cluster number
+
+subset_main_mesentery$orig_cluster.0.5 <- subset_main_mesentery$seurat_clusters
+DefaultAssay(subset_main_mesentery) <- "integrated"
+
+
+```
+
+```{r}
+
+subset_main_mesentery <- ScaleData(subset_main_mesentery)
+subset_main_mesentery <- RunPCA(subset_main_mesentery, npcs = 50)
+
+subset_main_mesentery <- RunUMAP(subset_main_mesentery, dims = 1:25)
+subset_main_mesentery <- FindNeighbors(subset_main_mesentery, dims = 1:25) %>% FindClusters(resolution = 0.5)
+
+
+```
+
+```{r}
+
+my_cols = brewer.pal(10,"Accent")
+mesentery_subset_wo8 <- DimPlot(subset_main_mesentery, reduction = "umap", label=T, 
+                                group.by = 'orig_cluster.0.5', cols=alpha(my_cols,0.66), pt.size=2) +
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "none",
+        plot.title = element_blank()
+        )
+
+mesentery_subset_wo8
+```
+
+```{r}
+
+slingshot_mesentery.v1 <- as.SingleCellExperiment(subset_main_mesentery, assay = 'RNA')
+
+```
+
+```{r}
+clusters_mesentery_info <- subset_main_mesentery$orig_cluster.0.5
+
+slingshot_mesentery.v1 <- slingshot::slingshot(slingshot_mesentery.v1, clusterLabels = clusters_mesentery_info,reducedDim = "PCA",
+                      allow.breaks = FALSE)
+
+```
+
+```{r}
+
+lnes <- getLineages(reducedDim(slingshot_mesentery.v1,"PCA"),
+                    clusters_mesentery_info)
+
+lnes@metadata$lineages
+
+```
+```{r}
+
+pseudo.paths.mesentery <- slingPseudotime(slingshot_mesentery.v1)
+head(pseudo.paths.mesentery)
+
+```
+```{r}
+my_cols <- c(brewer.pal(10,"Accent"), "grey")
+names(my_cols) <- unique(as.character(slingshot_mesentery.v1$orig_cluster.0.5))
+
+n <- ncol(slingshot_mesentery.v1)
+L <- ncol(slingPseudotime(slingshot_mesentery.v1))
+plot(as.numeric(slingPseudotime(slingshot_mesentery.v1)), jitter(rep(1:L, each=n)),pch=16, col = my_cols[as.character(slingshot_mesentery.v1$orig_cluster.0.5)])
+legend("topleft", legend=unique(slingshot_mesentery.v1$orig_cluster.0.5), title="Group", col = my_cols[as.character(slingshot_mesentery.v1$orig_cluster.0.5)], pch = 16, cex = 1.2)
+
+library(ggplot2)
+
+# Assuming 'test.slingshot.sce' is your SingleCellExperiment object
+# and it contains a column 'orig_cluster.0.5' for cluster IDs.
+# 'L' would be the number of lineages detected by slingshot.
+
+# Extract pseudotime and cluster information
+pseudotime <- as.numeric(slingPseudotime(slingshot_mesentery.v1))
+clusters <- slingshot_mesentery.v1$orig_cluster.0.5
+
+# Create a data frame for ggplot
+df <- data.frame(
+  Pseudotime = pseudotime,
+  Lineage = rep(1:L, each = length(pseudotime) / L), # Adjust if you have a different number of cells in each lineage
+  Cluster = factor(clusters),
+  Jitter = jitter(rep(1:L, each = length(pseudotime) / L)) # Same adjustment as above
+)
+
+# Create the plot
+mesentery_slingshot_pseudotime_jitter <- ggplot(df, aes(x = Pseudotime, y = Jitter, color = Cluster)) +
+  geom_point() +
+  scale_color_manual(values = my_cols) +
+  theme(legend.text=element_text(size=14)) + labs(colour = "Clusters")  +
+  guides(color = guide_legend(override.aes = list(size = 6))) +
+  theme_classic() +
+  xlab("Pseudotime") +
+  ylab("Lineage") +
+  scale_y_continuous(breaks = function(limits) seq(from = floor(limits[1]), to = ceiling(limits[2]), by = 1)) # Add this line to adjust y breaks
+  ggtitle("Pseudotime Plot")
+
+mesentery_slingshot_pseudotime_jitter
+
+```
+
+```{r}
+
+lin <- getLineages(reducedDim(slingshot_mesentery.v1,"PCA"),
+                    slingshot_mesentery.v1$orig_cluster.0.5)
+
+lin@metadata$lineages
+
+data("slingshotExample")
+rd <- reducedDim(slingshot_mesentery.v1,"PCA")[,1:3]
+cl <- slingshot_mesentery.v1$orig_cluster.0.5
+
+
+plot(reducedDims(slingshot_mesentery.v1)$UMAP, asp=1, col = 'grey75', pch = 16)
+points(reducedDims(slingshot_mesentery.v1)$UMAP, col = hcl.colors(100)[cut(slingPseudotime(slingshot_mesentery.v1)[,3], 100)], pch = 16)
+legend('topleft', title = 'Lineage 1', col = hcl.colors(3), legend=c('0%','50%','100%'), pch=16)
+```

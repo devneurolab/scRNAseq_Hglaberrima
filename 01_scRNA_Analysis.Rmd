@@ -1,0 +1,1835 @@
+---
+title: "scRNA 2.0"
+author: "Joshua Medina"
+date: "2024-02-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '/Users/joshuagmedina/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/08-SCRNA-HGLABv4/')
+```
+
+# 1.0 Setting up environment
+
+-   **1.1 Loading libraries**
+
+```{r}
+
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(DESeq2)
+library(SoupX)
+library(hdf5r)
+library(scCustomize)
+library(DropletUtils)
+library(cowplot)
+library(metap)
+library(scater)
+library(TSCAN)
+library(readr)
+library(RColorBrewer)
+library(patchwork)
+library(tidyverse)
+library(ggnewscale)
+library(reshape2)
+library(pcaMethods)
+library(velocyto.R)
+library(SeuratWrappers)
+library(SeuratDisk)
+#library(scSHC)
+library(ggrepel)
+
+```
+
+-   **1.2 Set working directory**
+
+```{r}
+
+setwd("/Users/joshuagmedina/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/08-SCRNA-HGLABv4/")
+
+```
+
+# 2.0 Quality Control
+
+## 2.1 SoupX
+
+- **Loading using `load10x`**
+
+```{r}
+
+m1_sc <- load10X("02_COUNTSwoMito/M1/outs")
+m1_sc_auto <- autoEstCont(m1_sc)
+m1_auto_out <- adjustCounts(m1_sc_auto)
+
+m2_sc <- load10X("02_COUNTSwoMito/M2/outs")
+m2_sc_auto <- autoEstCont(m2_sc)
+m2_auto_out <- adjustCounts(m2_sc_auto)
+
+r1_sc <- load10X("02_COUNTSwoMito/R1/outs")
+r1_sc_auto <- autoEstCont(r1_sc)
+r1_auto_out <- adjustCounts(r1_sc_auto)
+
+r2_sc <- load10X("02_COUNTSwoMito/R2/outs")
+r2_sc_auto <- autoEstCont(r2_sc)
+r2_auto_out <- adjustCounts(r2_sc_auto)
+
+```
+
+- **From SoupX to Seurat Object**
+
+```{r}
+
+m1_seurat.obj <- CreateSeuratObject(m1_auto_out, project = 'M1')
+m2_seurat.obj <- CreateSeuratObject(m2_auto_out, project = 'M2')
+r1_seurat.obj <- CreateSeuratObject(r1_auto_out, project = 'R1')
+r2_seurat.obj <- CreateSeuratObject(r2_auto_out, project = 'R2')
+
+```
+
+- **Merge All Tissues Seurat Objects**
+
+```{r}
+
+#Merge of mesentery samples
+all.combined <- merge(m1_seurat.obj, y = c(m2_seurat.obj, r1_seurat.obj, r2_seurat.obj),
+                      add.cell.ids = c("M1", "M2", "R1", "R2"), project = "ALL")
+all.combined
+
+```
+
+## 2.2 Quality Metrics Visualization
+
+```{r}
+
+VlnPlot(all.combined, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2)
+
+```
+
+```{r}
+FeatureScatter(all.combined, feature1 = "nCount_RNA", feature2 = "nFeature_RNA",
+               cols=alpha(my_cols,0.4), pt.size = 2)
+```
+
+- **2.2.1 Generating Metadata of Transcript Counts and UMI**
+
+```{r}
+
+all.combined$log10GenesPerUMI <- log10(all.combined$nFeature_RNA) / log10(all.combined$nCount_RNA)
+
+# Create metadata dataframe
+all.combined_metadata <- all.combined@meta.data
+
+# Add cell IDs to metadata
+all.combined_metadata$cells <- rownames(all.combined_metadata)
+
+# Create sample column
+all.combined_metadata$sample <- NA
+all.combined_metadata$sample[which(str_detect(all.combined_metadata$cells, "^M1_"))] <- "M1"
+all.combined_metadata$sample[which(str_detect(all.combined_metadata$cells, "^M2_"))] <- "M2"
+all.combined_metadata$sample[which(str_detect(all.combined_metadata$cells, "^R1_"))] <- "R1"
+all.combined_metadata$sample[which(str_detect(all.combined_metadata$cells, "^R2_"))] <- "R2"
+
+# Rename columns
+all.combined_metadata <- all.combined_metadata %>%
+        dplyr::rename(nUMI = nCount_RNA,
+                      nGene = nFeature_RNA)
+
+```
+
+
+```{r}
+
+# Visualize the number of cell counts per sample
+all.combined_metadata %>% 
+  	ggplot(aes(x=sample, fill=sample)) + 
+    scale_fill_manual(values = alpha(my_cols, 0.4)) +
+  	geom_bar() +
+  	theme_classic() +
+  	theme(plot.title = element_text(hjust=0.5, face="bold")) +
+  	ggtitle("NCells")
+
+```
+
+
+- **2.2.2 Novelty Score. Visualizing complexity of gene expression by visualizing genes detected per UMI.**
++ 
+
+```{r}
+
+# Visualize the overall complexity of the gene expression by visualizing the genes detected per UMI (novelty score)
+all.combined_metadata %>%
+  	ggplot(aes(x=log10GenesPerUMI, color = sample, fill=sample)) +
+    scale_fill_manual(values = alpha(my_cols, 0.4)) +
+  	geom_density(alpha = 0.2) +
+  	theme_classic() +
+  	geom_vline(xintercept = 0.8)
+
+```
+
+- **2.2.3 Number of UMIs/transcripts per cell.**
+
+
+```{r}
+
+all.combined_metadata %>% 
+  	ggplot(aes(color=sample, x=nUMI, fill= sample)) + 
+  	geom_density(alpha = 0.2) +
+    scale_fill_manual(values = alpha(my_cols, 0.4)) +
+    #scale_x_continuous(limits = c(0, 10000)) +
+  	scale_x_log10(limits = c(100,10000)) + 
+  	theme_classic() +
+  	ylab("Cell density") +
+  	geom_vline(xintercept = 500)
+
+```
+
+- **2.2.4 Visualizing the distribution of genes detecter per cell via histogram.**
+
+```{r}
+
+all.combined_metadata %>% 
+  	ggplot(aes(color=sample, x=nGene, fill= sample)) +
+    scale_fill_manual(values = alpha(my_cols, 0.4)) +
+  	geom_density(alpha = 0.2) + 
+  	theme_classic() +
+  	scale_x_log10() + 
+  	geom_vline(xintercept = 300)
+
+
+```
+
+- **2.2.5 Filtering the number by number features.**
+
+```{r}
+
+all.combined <- subset(all.combined, subset = nFeature_RNA > 50 & nFeature_RNA < 7500 & nCount_RNA < 40000)
+
+```
+
+- **2.2.6 Performing log normalizitation.**
+
+```{r}
+
+all.combined <- NormalizeData(all.combined, normalization.method = "LogNormalize", scale.factor = 10000)
+
+```
+
+# 3.0 Cell Clustering Pipeline - NOT INTEGRATED
+
+```{r}
+
+all.combined <- FindVariableFeatures(all.combined, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+all_combined.top10 <- head(VariableFeatures(all.combined), 10)
+
+# plot variable features with and without labels
+all_comb.plotv1 <- VariableFeaturePlot(all.combined)
+all_comb.plotv2 <- LabelPoints(plot = all_comb.plotv1, points = all_combined.top10, repel = TRUE)
+all_comb.plotv1 + all_comb.plotv2
+
+```
+
+```{r}
+
+all_comb.all_genes <- rownames(all.combined)
+all.combined <- ScaleData(all.combined, features = all_comb.all_genes)
+
+```
+
+```{r}
+
+all.combined <- RunPCA(all.combined, 
+                             features = VariableFeatures(object = all.combined))
+
+```
+
+```{r}
+
+VizDimLoadings(all.combined, dims = 1:2, reduction = "pca")
+
+```
+
+```{r}
+
+DimPlot(all.combined, reduction = "pca")
+
+```
+
+```{r}
+
+all.combined <- JackStraw(all.combined, num.replicate = 100, dims = 50)
+all.combined <- ScoreJackStraw(all.combined, dims = 1:50)
+
+```
+
+```{r}
+JackStrawPlot(all.combined, dims = 1:50)
+```
+
+```{r}
+
+all.combined <- FindNeighbors(all.combined, dims = 1:50)
+all.combined <- FindClusters(all.combined, resolution = 0.5)
+
+```
+
+```{r}
+
+all.combined <- RunUMAP(all.combined, dims = 1:50)
+DimPlot(all.combined, reduction = "umap", label = TRUE)
+
+```
+
+```{r}
+
+table(all.combined@meta.data$seurat_clusters)
+
+```
+
+### 3.0.1 Getting percentage of cells per tissue
+
+```{r}
+
+#library(Seurat)
+#library(dplyr)
+#library(tidyr)
+
+# Assuming 'seurat_obj' is your Seurat object
+# And assuming your Seurat object has metadata columns named 'seurat_clusters' for cluster assignments
+# and 'tissue' for tissue types
+
+# Create a table of counts of cells in each cluster within each tissue
+cell_counts_non_integrated <- all.combined@meta.data %>%
+  group_by(tissue, seurat_clusters, orig.ident) %>%
+  summarise(Count = n(), .groups = 'drop')
+
+# Calculate the total count of cells in each tissue
+total_counts_non_integrated <- cell_counts_non_integrated %>%
+  group_by(orig.ident) %>%
+  summarise(Total = sum(Count), .groups = 'drop')
+
+# Merge the total counts back with the original counts to calculate percentages
+percentages_non_integrated <- merge(cell_counts_non_integrated, total_counts_non_integrated, by = "orig.ident")
+
+# Calculate the percentage of cells in each cluster within each tissue
+percentages_non_integrated <- percentages_non_integrated %>%
+  mutate(Percentage = (Count / Total) * 100) %>%
+  dplyr::select(tissue, seurat_clusters, Percentage, orig.ident)
+
+# Optionally, you can spread the data to have one row per tissue and clusters as columns
+percentages_wide_non_integrated <- percentages_non_integrated %>%
+  pivot_wider(names_from = seurat_clusters, values_from = Percentage, values_fill = list(Percentage = 0))
+
+# View the resulting data frame
+print(percentages_non_integrated)
+print(percentages_wide_non_integrated)
+
+
+```
+
+
+## 3.1 Cluster Per Tissue Plot Viz.
+
+```{r}
+
+all.combined$tissue <- all.combined$orig.ident
+all.combined$tissue  <- replace(all.combined$tissue, all.combined$tissue %in% "M1", "Mesentery")
+all.combined$tissue  <- replace(all.combined$tissue, all.combined$tissue %in% "M2", "Mesentery")
+all.combined$tissue  <- replace(all.combined$tissue, all.combined$tissue %in% "R1", "Rudiment")
+all.combined$tissue  <- replace(all.combined$tissue, all.combined$tissue %in% "R2", "Rudiment")
+
+
+```
+
+```{r}
+
+DimPlot(all.combined, reduction = "umap", split.by = "tissue",
+        raster = FALSE, pt.size =  1.0, group.by = "tissue", 
+        cols = c("red", "blue"), shape.by = "tissue")
+
+
+```
+
+```{r}
+
+
+# Create the stacked bar plot
+stacked_bar_plot <- ggplot(percentages_non_integrated, aes(x = seurat_clusters, y = Percentage, fill = tissue)) +
+  geom_bar(stat = "identity", width = 0.40) +
+  labs(
+    x = "Cluster",
+    y = "Percentage",
+    fill = "Tissue"
+  ) +
+  scale_fill_brewer(palette = "Set1") +
+  theme_bw() +
+  theme(legend.position = "none") #+
+  #ggtitle("Stacked Bar Plot")
+
+```
+
+
+```{r}
+
+dim_per_tissue <- DimPlot(all.combined, reduction = "umap",
+        raster = FALSE, pt.size =  1.0, group.by = "orig.ident", 
+        cols = c("blue", "red"), shape.by = "tissue")
+  
+my_cols = brewer.pal(4,"Set1")
+dim_per_tissue <- DimPlot(all.combined, group.by='tissue',reduction = "umap",
+                          shape.by = "tissue", raster = FALSE, cols=alpha(my_cols,0.6),pt.size=1) + 
+  theme(legend.title=element_blank(), legend.position = "bottom")
+
+dim_per_tissue
+
+dim_per_tissue + stacked_bar_plot +
+   plot_layout(widths = c(2, 1))
+
+```
+
+
+## 3.2 Finding Marker Genes
+
+```{r}
+## RUN TO RESET VARIABLES ##
+
+# Define the range for i
+start_value <- 0
+end_value <- 14  # Adjust as needed
+
+# Loop through the range and remove variables
+for (i in start_value:end_value) {
+    rm(list = ls(pattern = paste0("all_tissues_cluster", i)), envir = .GlobalEnv)
+}
+
+
+```
+
+```{r}
+
+number_of_clusters <- 15
+
+for (i in 0:(number_of_clusters - 1)) {
+  cluster_marker = FindMarkers(all.combined, ident.1 = i)
+  cluster_marker$pct.diff <- cluster_marker$pct.1 - cluster_marker$pct.2
+  
+  # Dynamically naming the data frames
+  df_name <- paste("all.tissues.cluster", i, ".markers", sep = "")
+  assign(df_name, cluster_marker)
+}
+
+```
+
+```{r}
+
+# Example of how map_ids might look:
+# map_ids <- data.frame(X1 = c("g27011", "g27013"), X2 = c("LORF2", "PRS6A"), X3 = c("Desc1", "Desc2"), X4 = c("MoreDesc1", "MoreDesc2"))
+
+# Define the range of cluster numbers
+cluster_start <- 0
+cluster_end <- 14
+
+for (cluster_number in cluster_start:cluster_end) {
+  df_name <- paste0("all.tissues.cluster", cluster_number, ".markers")
+  final_df_name <- paste0("all_tissues_cluster", cluster_number)
+  
+  # Convert row names to a column 'ID'
+  current_df <- data.frame(ID = row.names(get(df_name)), get(df_name), row.names = NULL)
+  
+  # Create an index to match IDs from the current dataframe to the mapping dataframe
+  idx <- match(current_df$ID, human_uniprot.map$AnnotID)
+  
+  # Use the index to add the matching rows from map_ids to the current dataframe
+  # Including handling NA for unmatched rows
+  current_df$GeneSymbol <- ifelse(!is.na(idx), human_uniprot.map$`Gene Symbol`[idx], NA)
+  current_df$UniprotID <- ifelse(!is.na(idx), human_uniprot.map$`Uniprot ID`[idx], NA)
+  current_df$UniprotDescription <- ifelse(!is.na(idx), human_uniprot.map$`Uniprot Description`[idx], NA)
+  
+  # Assign the modified dataframe to the final dataframe name
+  assign(final_df_name, current_df)
+  
+  # Export the final dataframe to CSV
+  export_path <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/", final_df_name, ".csv")
+  write.csv(get(final_df_name), file = export_path, row.names = FALSE)
+}
+
+```
+
+Adding more gene info based on all uniprot reviewed data base
+
+```{r}
+# First, ensure additional_metadata has unique IDs
+# This example keeps the first occurrence of each ID
+all_uniprot.map <- all_uniprot.map[!duplicated(all_uniprot.map$ID), ]
+
+# Define the range of cluster numbers
+cluster_start <- 0
+cluster_end <- 14
+
+# Loop to add additional metadata to each final dataframe
+for (cluster_number in cluster_start:cluster_end) {
+  final_df_name <- paste0("all_tissues_cluster", cluster_number)
+  
+  # Check if the final dataframe exists in the environment
+  if(exists(final_df_name)) {
+    # Retrieve the final dataframe from the previous loop
+    final_df <- get(final_df_name)
+    
+    # Merge the additional metadata into the final dataframe based on the 'ID' column
+    # Using the unique version of additional_metadata
+    updated_final_df <- merge(final_df, all_uniprot.map, by = "ID", all.x = TRUE)
+    
+    # Reassign the updated dataframe back to the same variable name
+    assign(final_df_name, updated_final_df)
+    
+    # Export the updated final dataframe to CSV (overwriting the previous file)
+    # export_path <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/", final_df_name, ".csv")
+    # write.csv(updated_final_df, file = export_path, row.names = FALSE)
+  }
+}
+
+print("All data frames have been updated with additional metadata and exported.")
+
+```
+
+### 3.3 Exporting markers info to excel
+
+```{r}
+
+library(openxlsx)
+
+# Define the range of cluster numbers
+cluster_start <- 0
+cluster_end <- 14
+
+# Specify the path for the output Excel file
+output_excel_file <- paste0(getwd(), "/Cluster_Markers_and_Metadata_Annotv4_08.xlsx")
+
+# Create a new workbook
+wb <- createWorkbook()
+
+# Loop to add each data frame to a separate sheet in the workbook
+for (cluster_number in cluster_start:cluster_end) {
+  final_df_name <- paste0("all_tissues_cluster", cluster_number)
+  
+  # Check if the data frame exists in the environment
+  if(exists(final_df_name)) {
+    # Retrieve the data frame
+    final_df <- get(final_df_name)
+    
+    # Add a sheet to the workbook with the data frame, named by the cluster number
+    addWorksheet(wb, sheetName = paste("Cluster", cluster_number))
+    writeData(wb, sheet = paste("Cluster", cluster_number), x = final_df)
+  }
+}
+
+# Save the workbook to the specified Excel file
+saveWorkbook(wb, file = output_excel_file, overwrite = TRUE)
+
+print(paste("Excel file with cluster data has been saved to", output_excel_file))
+
+
+```
+
+
+# 4.0 Integration Analysis
+## 4.1 Mesentery 
+
+```{r}
+
+mesentery_list <- list()
+mesentery_list[["M1"]] <- m1_seurat.obj
+mesentery_list[["M2"]] <- m2_seurat.obj
+
+for (i in 1:length(mesentery_list)) {
+  mesentery_list[[i]] <- NormalizeData(mesentery_list[[i]])
+  mesentery_list[[i]] <- FindVariableFeatures(mesentery_list[[i]], nfeatures = 3000)
+}
+
+```
+
+- Identify anchors in the data sets.
+
+```{r}
+
+mesentery_anchors <- FindIntegrationAnchors(object.list = mesentery_list, dims = 1:20)
+
+```
+
+- Perform expression level correction.
+
+```{r}
+
+mesentery_seurat <- IntegrateData(anchorset = mesentery_anchors, dims = 1:20)
+
+```
+
+```{r}
+
+mesentery_seurat <- ScaleData(mesentery_seurat)
+mesentery_seurat <- RunPCA(mesentery_seurat, npcs = 50)
+mesentery_seurat <- RunUMAP(mesentery_seurat, dims = 1:20)
+mesentery_seurat <- FindNeighbors(mesentery_seurat, dims = 1:20) %>% FindClusters(resolution = 0.6)
+
+# # You may also want to save the object
+# saveRDS(seurat, file="integrated_seurat.rds")
+
+# DefaultAssay(mesentery_seurat) <- "integrated"
+# mesentery_seurat <- ScaleData(mesentery_seurat, verbose = F)
+# mesentery_seurat <- RunPCA(mesentery_seurat, npcs = 20, verbose = F)
+# mesentery_seurat <- RunUMAP(mesentery_seurat, reduction = "pca", dims = 1:20, verbose = F)
+
+```
+
+```{r}
+
+DimPlot(mesentery_seurat, reduction = "umap", label=T)
+
+```
+
+
+```{r}
+
+DimPlot(mesentery_seurat, reduction = "umap", group.by = "orig.ident", raster = FALSE, cols=alpha(my_cols,0.6))
+
+```
+### 4.1.2 Non-Integrated Mesentery
+
+```{r}
+DefaultAssay(mesentery_seurat) <- "RNA"
+mesentery_seurat <- FindVariableFeatures(mesentery_seurat, selection.method = "vst", nfeatures = 3000)
+mesentery_seurat <- ScaleData(mesentery_seurat)
+mesentery_seurat <- RunPCA(mesentery_seurat, npcs = 50)
+mesentery_seurat <- RunUMAP(mesentery_seurat, dims = 1:20)
+mesentery_seurat <- FindNeighbors(mesentery_seurat, dims = 1:20) %>% FindClusters(resolution = 0.6)
+
+
+```
+
+```{r}
+
+
+DimPlot(mesentery_seurat, reduction = "umap", group.by = "orig.ident", raster = FALSE, cols=alpha(my_cols,0.6))
+
+```
+## 4.1 Rudiment 
+
+```{r}
+
+rudiment_list <- list()
+rudiment_list[["R1"]] <- r1_seurat.obj
+rudiment_list[["R2"]] <- r2_seurat.obj
+
+for (i in 1:length(rudiment_list)) {
+  rudiment_list[[i]] <- NormalizeData(rudiment_list[[i]])
+  rudiment_list[[i]] <- FindVariableFeatures(rudiment_list[[i]], nfeatures = 3000)
+}
+
+```
+
+- Identify anchors in the data sets.
+  - This funcion chooses genes to perform integration based on their frequencies being identifed as highly variable genes in individual data sets. Thus, the nfeatures of FindVariableFeatures paremeter is going to influence the gene set for integration. Also, the `anchor.features` of the integration based on anchors afects these.
+  
+```{r}
+
+rudiment_anchors <- FindIntegrationAnchors(object.list = rudiment_list, dims = 1:20)
+
+```
+
+- Perform expression level correction.
+
+```{r}
+
+rudiment_seurat <- IntegrateData(anchorset = rudiment_anchors, dims = 1:20)
+
+```
+
+```{r}
+
+rudiment_seurat <- ScaleData(rudiment_seurat)
+rudiment_seurat <- RunPCA(rudiment_seurat, npcs = 50)
+rudiment_seurat <- RunUMAP(rudiment_seurat, dims = 1:20)
+rudiment_seurat <- FindNeighbors(rudiment_seurat, dims = 1:20) %>% FindClusters(resolution = 0.6)
+
+```
+
+
+```{r}
+
+DimPlot(rudiment_seurat, reduction = "umap")
+
+```
+
+
+
+```{r}
+
+DimPlot(rudiment_seurat, reduction = "umap", group.by = "orig.ident", raster = FALSE, cols=alpha(my_cols,0.6))
+
+```
+### 4.1.2 Non-Integrated Rudiment
+
+```{r}
+DefaultAssay(rudiment_seurat) <- "RNA"
+rudiment_seurat <- FindVariableFeatures(rudiment_seurat, selection.method = "vst", nfeatures = 3000)
+rudiment_seurat <- ScaleData(rudiment_seurat)
+rudiment_seurat <- RunPCA(rudiment_seurat, npcs = 50)
+rudiment_seurat <- RunUMAP(rudiment_seurat, dims = 1:20)
+rudiment_seurat <- FindNeighbors(rudiment_seurat, dims = 1:20) %>% FindClusters(resolution = 0.6)
+
+
+```
+
+```{r}
+
+
+DimPlot(rudiment_seurat, reduction = "umap", group.by = "orig.ident", raster = FALSE, cols=alpha(my_cols,0.6))
+
+```
+
+
+# 5.0 Integrating All Data
+
+## 5.1 Dim 1:20
+
+```{r}
+
+all_tissues_list <- list()
+all_tissues_list[["M1"]] <- m1_seurat.obj
+all_tissues_list[["M2"]] <- m2_seurat.obj
+all_tissues_list[["R1"]] <- r1_seurat.obj
+all_tissues_list[["R2"]] <- r2_seurat.obj
+
+for (i in 1:length(all_tissues_list)) {
+  #all_tissues_list[[i]] <- subset(all_tissues_list[[i]], subset = nFeature_RNA > 50 & nFeature_RNA < 7500 & nCount_RNA < 30000)
+  all_tissues_list[[i]] <- NormalizeData(all_tissues_list[[i]])
+  all_tissues_list[[i]] <- FindVariableFeatures(all_tissues_list[[i]], nfeatures = 2000)
+}
+
+```
+
+- Identify anchors in the data sets.
+
+```{r}
+
+tissues_anchors <- FindIntegrationAnchors(object.list = all_tissues_list, dims = 1:20, verbose = F)
+
+```
+
+- Perform expression level correction.
+
+```{r}
+
+all_tissues_seurat <- IntegrateData(anchorset = tissues_anchors, dims = 1:20)
+
+```
+
+*Data Scaling and Clustering*
+
+```{r}
+
+all_tissues_seurat <- ScaleData(all_tissues_seurat)
+all_tissues_seurat <- RunPCA(all_tissues_seurat, npcs = 50)
+
+all_tissues_seurat <- RunUMAP(all_tissues_seurat, dims = 1:20)
+all_tissues_seurat <- FindNeighbors(all_tissues_seurat, dims = 1:20) %>% FindClusters(resolution = 0.5)
+
+```
+
+# *SAVING SEURAT OBJECT*
+```{r}
+
+# # You may also want to save the object
+#saveRDS(all_tissues_seurat, file="02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/integrated_seurat_object_final_may20.rds")
+
+```
+
+
+*PCA*
+
+```{r}
+my_cols = brewer.pal(4,"Set1")
+pca_integrated <- DimPlot(all_tissues_seurat, reduction = "pca", group.by = "orig.ident",
+                          cols=alpha(my_cols,0.4), pt.size = 2) +
+  theme(plot.title = element_blank())
+pca_integrated
+
+```
+
+## 5.2 Dimensionality Plot
+
+
+
+```{r}
+library(ggh4x)
+
+axis <- ggh4x::guide_axis_truncated(
+  trunc_lower = unit(0, "npc"),
+  trunc_upper = unit(2, "cm")
+)
+
+DimPlot(all_tissues_seurat, reduction = "umap", label=T) + 
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank())
+  
+
+```
+
+```{r}
+
+polychrome_pal <- DiscretePalette_scCustomize(num_colors = 13, palette = "polychrome")
+print(polychrome_pal)
+
+glasbey_pal <- DiscretePalette_scCustomize(num_colors = 14, palette = "glasbey")
+print(glasbey_pal)
+
+clusters_for_col = 0:(13 - 1)
+
+cluster_colors = setNames(c('#FB3227', '#0000FFFF', '#00FF00FF', '#B1CC71FF', '#FF00B6FF', '#005300FF',
+                            '#FFA500','#999999', '#9A4D42FF', '#00FFBEFF', '#783FC1FF',
+                            '#1F9698FF', '#FFACFDFF'), clusters_for_col)
+
+
+```
+
+
+```{r}
+
+dimplot_fig1 <- DimPlot(all_tissues_seurat, reduction = "umap", label=T, cols = cluster_colors, pt.size = 1.5) + 
+  guides(x = axis, y = axis, colour = guide_legend(override.aes = list(size=10))) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 18),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.key.size = unit(1, 'cm'),
+        legend.text = element_text(size=20))
+
+dimplot_fig1
+
+```
+
+### 5.2.1 Renamed Dimplot
+
+```{r}
+
+renamed_all_tissues_seurat <- all_tissues_seurat
+ 
+ # Rename identity classes
+renamed_all_tissues_seurat <- RenameIdents(object = renamed_all_tissues_seurat, `0` = "C0", `1` = "C1", `2` = "C2",
+                          `3` = "C3", `4` = "C4", `5` = "C5", `6` = "C6",
+                          `7` = "C7", `8` = "C8", `9` = "C9",
+                          `10` = "C10", `11` = "C11", `12` = "C12")
+
+clusters_for_col_renamed <- paste0("C", 0:(13 - 1))
+
+clusters_for_col_renamed <- setNames(c('#FB3227', '#0000FFFF', '#00FF00FF', '#B1CC71FF', '#FF00B6FF', '#005300FF',
+                            '#FFA500','#999999', '#9A4D42FF', '#00FFBEFF', '#783FC1FF',
+                            '#1F9698FF', '#FFACFDFF'), clusters_for_col_renamed)
+
+dimplot_fig1_renamed <- DimPlot(renamed_all_tissues_seurat, reduction = "umap", label=F, cols = clusters_for_col_renamed, pt.size = 1.5) + 
+  guides(x = axis, y = axis, colour = guide_legend(override.aes = list(size=10))) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 18),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.key.size = unit(1, 'cm'),
+        legend.text = element_text(size=20))
+
+dimplot_fig1_renamed <- LabelClusters(
+  plot = dimplot_fig1_renamed, 
+  id = "ident", 
+  repel = TRUE,               # Ensure labels repel from points
+  fontface = "bold",          # Bold font for labels
+  size = 5,                   # Label size
+  box.padding = 2           # Increase padding around labels (adjust as needed)
+)
+
+dimplot_fig1_renamed
+
+```
+
+
+
+*Cluster with cells per sample*
+
+```{r}
+my_cols = brewer.pal(4,"Set1")
+DimPlot(all_tissues_seurat, reduction = "umap", group.by = "orig.ident", raster = FALSE, cols=alpha(my_cols,0.2), pt.size = 2)
+
+```
+
+```{r}
+
+DimPlot(all_tissues_seurat, reduction = "umap", split.by = "orig.ident", group.by = "orig.ident",
+        raster = FALSE, cols=alpha(my_cols,0.4), pt.size = 2)
+
+
+```
+
+
+## 5.3 Cells per tissue
+
+```{r}
+
+all_tissues_seurat$tissue <- all_tissues_seurat$orig.ident
+all_tissues_seurat$tissue  <- replace(all_tissues_seurat$tissue, all_tissues_seurat$tissue %in% "M1", "Mesentery")
+all_tissues_seurat$tissue  <- replace(all_tissues_seurat$tissue, all_tissues_seurat$tissue %in% "M2", "Mesentery")
+all_tissues_seurat$tissue  <- replace(all_tissues_seurat$tissue, all_tissues_seurat$tissue %in% "R1", "Anlage")
+all_tissues_seurat$tissue  <- replace(all_tissues_seurat$tissue, all_tissues_seurat$tissue %in% "R2", "Anlage")
+
+```
+
+*Dimensionality Plot Per Tissue*
+
+```{r}
+
+my_cols = brewer.pal(4,"Set1")
+
+DimPlot(all_tissues_seurat, reduction = "umap", split.by = "tissue",
+        raster = FALSE, pt.size =  1.0, group.by = "tissue", 
+        cols=alpha(my_cols,0.5), shape.by = "tissue") +
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank())
+
+
+```
+
+## 5.4 Percentage of cells per tissue
+
+```{r}
+
+table(all_tissues_seurat@meta.data$tissue)
+
+# Create a table of counts of cells in each cluster within each tissue
+cell_counts <- all_tissues_seurat@meta.data %>%
+  group_by(tissue, seurat_clusters) %>%
+  summarise(Count = n(), .groups = 'drop')
+
+# Calculate the total count of cells in each tissue
+total_counts <- cell_counts %>%
+  group_by(seurat_clusters) %>%
+  summarise(Total = sum(Count), .groups = 'drop')
+
+# Merge the total counts back with the original counts to calculate percentages
+percentages <- merge(cell_counts, total_counts, by = "seurat_clusters")
+
+# Calculate the percentage of cells in each cluster within each tissue
+percentages <- percentages %>%
+  mutate(Percentage = (Count / Total) * 100) %>%
+  dplyr::select(tissue, seurat_clusters, Percentage)
+
+# Optionally, you can spread the data to have one row per tissue and clusters as columns
+percentages_wide <- percentages %>%
+  pivot_wider(names_from = seurat_clusters, values_from = Percentage, values_fill = list(Percentage = 0))
+
+# View the resulting data frame
+print(percentages)
+print(percentages_wide)
+
+```
+
+
+
+```{r}
+
+
+# Create the stacked bar plot
+custom_colors <- c("Anlage" = "#228B22", "Mesentery" = "#FA8072")  # Salmon Pink and Forest Green
+
+percentage_cells_per_tissue <- ggplot(percentages, aes(x = seurat_clusters, y = Percentage, fill = tissue)) +
+  geom_bar(stat = "identity", width = 0.40) +
+  labs(
+    x = "Cluster",
+    y = "Percentage",
+    fill = "Tissue"
+  ) +
+  scale_fill_manual(values = custom_colors) +
+  theme_classic() +
+  theme(legend.position = "none",panel.grid.major.y = element_line(colour = "dark gray"),
+        axis.text = element_text(size = 18, color="black"),
+        axis.title=element_text(size=18,face="bold"))
+
+percentage_cells_per_tissue
+
+```
+
+
+```{r}
+
+#my_cols = brewer.pal(4,"Set1")
+my_cols = c("#228B22","#FA8072")
+dim_per_tissue <- DimPlot(all_tissues_seurat, group.by='tissue',reduction = "umap",
+                          raster = FALSE, cols=alpha(my_cols,0.8),pt.size=2) +
+  guides(x = axis, y = axis, colour = guide_legend(override.aes = list(size=8))) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 18),
+        legend.position = c(0, 1), 
+        legend.justification = c(0, 1),legend.box = "horizontal",
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(),
+        plot.title = element_blank(),
+        )
+
+dim_per_tissue
+
+
+
+
+dim_per_tissue_v2 <-  DimPlot(all_tissues_seurat, 
+                              reduction = "umap", split.by = "tissue",
+                              raster = FALSE, pt.size =  2.0, 
+                              group.by = "tissue", cols=alpha(my_cols,0.9)) +
+  guides(x = axis, y = axis, colour = guide_legend(override.aes = list(size=8))) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 18),
+        legend.position = c(0, 1), 
+        legend.justification = c(0, 1),legend.box = "horizontal",
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(),
+        plot.title = element_blank(),
+        strip.text = element_blank()
+        )
+
+dim_per_tissue_v2
+
+fig1cd <- plot_grid(dim_per_tissue_v2, percentage_cells_per_tissue, 
+                           ncol = 2, rel_widths = c(2, 1))
+
+```
+
+## 5.5 Cells in Clusters per Animal
+
+```{r}
+#library(tidyr)
+
+# Assuming 'seurat_obj' is your Seurat object
+# And assuming your Seurat object has metadata columns named 'seurat_clusters' for cluster assignments
+# and 'tissue' for tissue types
+
+# Create a table of counts of cells in each cluster within each tissue
+cell_counts_animals <- all_tissues_seurat@meta.data %>%
+  group_by(tissue, seurat_clusters, orig.ident) %>%
+  summarise(Count = n(), .groups = 'drop')
+
+# Calculate the total count of cells in each tissue
+total_counts_animals <- cell_counts_animals %>%
+  group_by(orig.ident) %>%
+  summarise(Total = sum(Count), .groups = 'drop')
+
+# Merge the total counts back with the original counts to calculate percentages
+percentages_animals <- merge(cell_counts_animals, total_counts_animals, by = "orig.ident")
+
+# Calculate the percentage of cells in each cluster within each tissue
+percentages_animals <- percentages_animals %>%
+  mutate(Percentage = (Count / Total) * 100) %>%
+  dplyr::select(tissue, seurat_clusters, Percentage, orig.ident)
+
+# Optionally, you can spread the data to have one row per tissue and clusters as columns
+percentages_wide_animals <- percentages_animals %>%
+  pivot_wider(names_from = seurat_clusters, values_from = Percentage, values_fill = list(Percentage = 0))
+
+# View the resulting data frame
+print(percentages_animals)
+print(percentages_wide_animals)
+
+
+```
+
+```{r}
+
+percentage_cells_per_animal <- percentages_animals %>%
+  # Create a new identifier by extracting the numeric part of orig.ident
+  mutate(orig.ident.group = sub(".*([0-9])$", "\\1", orig.ident)) %>%
+  # Group by seurat_clusters and this new identifier
+  group_by(seurat_clusters, orig.ident.group) %>%
+  # Sum the percentages within each group
+  summarise(SumPercentages = sum(Percentage, na.rm = TRUE)) %>%
+  # Optional: Spread the data for a wide format view, if needed
+  ungroup()
+
+```
+
+```{r}
+
+barplot_grouped_by_sample <- ggplot(percentage_cells_per_animal, aes(x = seurat_clusters, y = SumPercentages, fill = orig.ident.group)) +
+  geom_bar(stat = "identity", width = 0.50, position=position_dodge()) +
+  labs(
+    x = "Cluster",
+    y = "Percentage of Cells",
+    fill = "Animal"
+  ) +
+  ggtitle("Percentage of Cells of Clusters per Animal") +
+#  scale_y_continuous(breaks=seq(0, 30, 5)) +
+  theme_bw() +
+  theme(legend.position = "right")
+
+barplot_grouped_by_sample
+
+```
+
+## 5.6 Cells per Tissue Sample
+
+```{r}
+
+my_cols = brewer.pal(4,"Paired")
+cluster_grouped_by_sample <- DimPlot(all_tissues_seurat, group.by='orig.ident',reduction = "umap",
+                          shape.by = "tissue", raster = FALSE, cols=alpha(my_cols,0.5),pt.size=2) + 
+  theme(legend.title=element_blank(), legend.position = "bottom")
+
+
+
+barplot_grouped_by_sample <- ggplot(percentages_animals, aes(x = seurat_clusters, y = Percentage, fill = orig.ident)) +
+  geom_bar(stat = "identity", width = 0.50, position=position_dodge()) +
+  labs(
+    x = "Cluster",
+    y = "Percentage of Cells",
+    fill = "Tissue"
+  ) +
+  ggtitle("Percentage of Cells (Dim 1:20)") +
+  scale_y_continuous(breaks=seq(0, 30, 5)) +
+  scale_fill_brewer(palette = "Paired") +
+  theme_bw() +
+  theme(legend.position = "right")
+
+barplot_grouped_by_sample
+
+cluster_grouped_by_sample + barplot_grouped_by_sample +
+   plot_layout(widths = c(2, 1))
+
+
+```
+## 5.7 Cells per Cluster
+
+```{r}
+
+table(all_tissues_seurat@meta.data$tissue)
+
+# Create a table of counts of cells in each cluster within each tissue
+cell_counts_clusters <- all_tissues_seurat@meta.data %>%
+  group_by(seurat_clusters) %>%
+  summarise(Count = n(), .groups = 'drop')
+
+
+total_cells <- sum(cell_counts_clusters$Count)
+total_cells
+
+percentage_cells_per_cluster <- cell_counts_clusters %>%
+  mutate(Percentage = (Count / total_cells) * 100)
+
+head(percentage_cells_per_cluster)
+
+```
+
+```{r}
+
+ggplot(percentage_cells_per_cluster, aes(x = seurat_clusters, y = Percentage, fill = seurat_clusters)) +
+  geom_bar(stat = "identity", width = 0.50, position=position_dodge()) +
+  labs(
+    x = "Cluster",
+    y = "Percentage of Cells",
+    fill = "Tissue"
+  ) +
+  ggtitle("Percentage of Cells per Cluster") +
+#  scale_y_continuous(breaks=seq(0, 30, 5)) +
+#  scale_fill_brewer(palette = "Paired") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+```
+
+
+----
+
+## 5.8 Non-Integrated All Tissues
+
+```{r}
+DefaultAssay(all_tissues_seurat) <- "RNA"
+all_tissues_seurat <- FindVariableFeatures(all_tissues_seurat, selection.method = "vst", nfeatures = 2000)
+all_tissues_seurat <- ScaleData(all_tissues_seurat)
+all_tissues_seurat <- RunPCA(all_tissues_seurat, npcs = 50)
+all_tissues_seurat <- RunUMAP(all_tissues_seurat, dims = 1:20)
+all_tissues_seurat <- FindNeighbors(all_tissues_seurat, dims = 1:20) %>% FindClusters(resolution = 0.6)
+
+
+```
+
+```{r}
+
+DimPlot(all_tissues_seurat, reduction = "umap", label = T)
+
+```
+
+
+```{r}
+
+DimPlot(all_tissues_seurat, reduction = "umap", group.by = "orig.ident", raster = FALSE, cols=alpha(my_cols,0.6))
+
+```
+
+---
+
+## 5.9 Testing Clusters
+
+*Check matrix integrity - negative integers or non-integer values*
+
+```{r}
+
+check_non_negative_integers <- function(mat) {
+  # Check if all values are non-negative
+  is_non_negative <- all(mat >= 0)
+  
+  # Check if all values are integers
+  is_integer <- all(floor(mat) == mat)
+  
+  # Return TRUE if all conditions are met, otherwise FALSE
+  return(is_non_negative & is_integer)
+}
+
+
+result <- check_non_negative_integers(all_tissues_seurat@assays$RNA@counts)
+
+negative_values <- sc_count_matrix[sc_count_matrix < 0]
+non_integer_values <- sc_count_matrix[sc_count_matrix != floor(sc_count_matrix)]
+
+```
+
+
+```{r}
+library(scSHC)
+
+
+m1_raw_dir <- "02_COUNTSwoMito/M1/outs/raw_feature_bc_matrix/"
+m1_raw <- Read10X(data.dir = m1_raw_dir)
+m1_raw_seurat <- CreateSeuratObject(counts = m1_raw)
+
+m2_raw_dir <- "02_COUNTSwoMito/M2/outs/raw_feature_bc_matrix/"
+m2_raw <- Read10X(data.dir = m2_raw_dir)
+m2_raw_seurat <- CreateSeuratObject(counts = m2_raw)
+
+r1_raw_dir <- "02_COUNTSwoMito/R1/outs/raw_feature_bc_matrix/"
+r1_raw <- Read10X(data.dir = r1_raw_dir)
+r1_raw_seurat <- CreateSeuratObject(counts = r1_raw)
+
+r2_raw_dir <- "02_COUNTSwoMito/R2/outs/raw_feature_bc_matrix/"
+r2_raw <- Read10X(data.dir = r2_raw_dir)
+r2_raw_seurat <- CreateSeuratObject(counts = r2_raw)
+
+raw_all <- merge(m1_raw_seurat, y = c(m2_raw_seurat, r1_raw_seurat, r2_raw_seurat), project = "ALL")
+
+
+sc_count_matrix <- all_tissues_seurat[["RNA"]]@counts
+sc_count_matrix <- round(sc_count_matrix)
+clusters <- all_tissues_seurat$integrated_snn_res.0.5
+#save(clusters, file = "./02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/cluster_vector_integrated.RData")
+
+new_seurat <- testClusters(sc_count_matrix,cluster_ids=as.character(clusters))
+table(new_seurat[[1]],Idents(all_tissues_seurat))
+new_seurat[[2]]
+
+tail(all_tissues_seurat.v2[["RNA"]]@counts@i)
+
+```
+
+```{r}
+
+new_seurat_raw <- testClusters(raw_all@assays[["RNA"]]@counts,cluster_ids=as.character(clusters), parallel = FALSE)
+
+```
+
+```{r}
+
+all_tissues_seurat.v2 <- all_tissues_seurat
+all_tissues_seurat.v2$corrected_seurat <- new_seurat[[1]]
+DefaultAssay(all_tissues_seurat.v2) <- "integrated"
+
+Idents(all_tissues_seurat.v2) <- all_tissues_seurat.v2$corrected_seurat
+
+all_tissues_seurat.v2 <- RenameIdents(object = all_tissues_seurat.v2, `new10` = "C0", `new11` = "C1", `new2` = "C2",
+                          `new4` = "C3/4", `new7` = "C5", `new1` = "C6",
+                          `new3` = "C7", `new12` = "C8", `new9` = "C9",
+                          `new5` = "C10", `new8` = "C11", `new6` = "C12")
+
+all_tissues_seurat.v2$corrected_seurat <- Idents(all_tissues_seurat.v2)
+
+clusters_for_col_stats <- c("C0", "C1", "C2", "C3/4", "C5", "C6", "C7", "C8", "C9",
+                              "C10", "C11", "C12")
+
+clusters_for_col_stats <- setNames(c('#FB3227', '#0000FFFF', '#00FF00FF', 'black', '#005300FF',
+                            '#FFA500','#999999', '#9A4D42FF', '#00FFBEFF', '#783FC1FF',
+                            '#1F9698FF', '#FFACFDFF'), clusters_for_col_stats)
+
+DimPlot(all_tissues_seurat.v2,group.by='corrected_seurat', label = FALSE, pt.size = 1.5, cols = clusters_for_col_stats) + 
+  guides(x = axis, y = axis, colour = guide_legend(override.aes = list(size=10))) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 18),
+        plot.title = element_blank(),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.key.size = unit(1, 'cm'),
+        legend.text = element_text(size=20))
+
+```
+
+
+
+---
+# UNUSED
+### 4.3.2 Dim 1:30
+
+<!-- ```{r} -->
+
+<!-- all_tissues_list <- list() -->
+<!-- all_tissues_list[["M1"]] <- m1_seurat.obj -->
+<!-- all_tissues_list[["M2"]] <- m2_seurat.obj -->
+<!-- all_tissues_list[["R1"]] <- r1_seurat.obj -->
+<!-- all_tissues_list[["R2"]] <- r2_seurat.obj -->
+
+<!-- for (i in 1:length(all_tissues_list)) { -->
+<!--   all_tissues_list[[i]] <- NormalizeData(all_tissues_list[[i]]) -->
+<!--   all_tissues_list[[i]] <- FindVariableFeatures(all_tissues_list[[i]], nfeatures = 2000) -->
+<!-- } -->
+
+<!-- ``` -->
+
+- Identify anchors in the data sets.
+
+```{r}
+
+tissues_anchors_30 <- FindIntegrationAnchors(object.list = all_tissues_list, dims = 1:30)
+
+```
+
+- Perform expression level correction.
+
+```{r}
+
+all_tissues_seurat_30 <- IntegrateData(anchorset = tissues_anchors_30, dims = 1:30)
+
+```
+
+
+```{r}
+
+all_tissues_seurat_30 <- ScaleData(all_tissues_seurat_30)
+all_tissues_seurat_30 <- RunPCA(all_tissues_seurat_30, npcs = 50)
+
+all_tissues_seurat_30 <- RunUMAP(all_tissues_seurat_30, dims = 1:30)
+all_tissues_seurat_30 <- FindNeighbors(all_tissues_seurat_30, dims = 1:30) %>% FindClusters(resolution = 0.6)
+
+# # You may also want to save the object
+# saveRDS(seurat, file="integrated_seurat.rds")
+
+
+```
+
+```{r}
+
+DimPlot(all_tissues_seurat_30, reduction = "pca", group.by = "orig.ident")
+
+```
+
+```{r}
+
+DimPlot(all_tissues_seurat_30, reduction = "umap", label=T)
+
+```
+
+```{r}
+
+DimPlot(all_tissues_seurat_30, reduction = "umap", group.by = "orig.ident", raster = FALSE, cols=alpha(my_cols,0.6))
+
+```
+
+#### 4.3.1.1 Getting percentage of cells per tissue
+
+```{r}
+#DefaultAssay(all_tissues_seurat_30) <- "RNA"
+all_tissues_seurat_30$tissue <- all_tissues_seurat_30$orig.ident
+all_tissues_seurat_30$tissue  <- replace(all_tissues_seurat_30$tissue, all_tissues_seurat_30$tissue %in% "M1", "Mesentery")
+all_tissues_seurat_30$tissue  <- replace(all_tissues_seurat_30$tissue, all_tissues_seurat_30$tissue %in% "M2", "Mesentery")
+all_tissues_seurat_30$tissue  <- replace(all_tissues_seurat_30$tissue, all_tissues_seurat_30$tissue %in% "R1", "Rudiment")
+all_tissues_seurat_30$tissue  <- replace(all_tissues_seurat_30$tissue, all_tissues_seurat_30$tissue %in% "R2", "Rudiment")
+```
+
+
+```{r}
+
+# Assuming 'seurat_obj' is your Seurat object
+# And assuming your Seurat object has metadata columns named 'seurat_clusters' for cluster assignments
+# and 'tissue' for tissue types
+
+# Create a table of counts of cells in each cluster within each tissue
+cell_counts_30 <- all_tissues_seurat_30@meta.data %>%
+  group_by(tissue, seurat_clusters, orig.ident) %>%
+  summarise(Count = n(), .groups = 'drop')
+
+# Calculate the total count of cells in each tissue
+total_counts_30 <- cell_counts_30 %>%
+  group_by(orig.ident) %>%
+  summarise(Total = sum(Count), .groups = 'drop')
+
+# Merge the total counts back with the original counts to calculate percentages
+percentages_30 <- merge(cell_counts_30, total_counts_30, by = "orig.ident")
+
+# Calculate the percentage of cells in each cluster within each tissue
+percentages_30 <- percentages_30 %>%
+  mutate(Percentage = (Count / Total) * 100) %>%
+  select(tissue, seurat_clusters, Percentage, orig.ident)
+
+# Optionally, you can spread the data to have one row per tissue and clusters as columns
+percentages_wide_30 <- percentages_30 %>%
+  pivot_wider(names_from = seurat_clusters, values_from = Percentage, values_fill = list(Percentage = 0))
+
+# View the resulting data frame
+print(percentages_30)
+print(percentages_wide_30)
+
+
+```
+
+
+#### 4.3.1.2 Cluster Per Tissue Plot Viz.
+
+```{r}
+
+DimPlot(all_tissues_seurat_30, reduction = "umap", split.by = "tissue",
+        raster = FALSE, pt.size =  1.0, group.by = "tissue", 
+        cols = c("red", "blue"), shape.by = "tissue")
+
+
+```
+
+```{r}
+
+
+# Create the stacked bar plot
+stacked_bar_plot_30 <- ggplot(percentages_30, aes(x = seurat_clusters, y = Percentage, fill = tissue)) +
+  geom_bar(stat = "identity", width = 0.40) +
+  labs(
+    x = "Cluster",
+    y = "Percentage",
+    fill = "Tissue"
+  ) +
+  scale_fill_brewer(palette = "Set1") +
+  theme_bw() +
+  theme(legend.position = "none") #+
+  #ggtitle("Stacked Bar Plot")
+
+stacked_bar_plot_30
+
+```
+
+
+```{r}
+
+my_cols = brewer.pal(4,"Set1")
+dim_per_tissue_30 <- DimPlot(all_tissues_seurat_30, group.by='tissue',reduction = "umap",
+                          shape.by = "tissue", raster = FALSE, cols=alpha(my_cols,0.6),pt.size=1) + 
+  theme(legend.title=element_blank(), legend.position = "bottom")
+
+dim_per_tissue_30
+
+dim_per_tissue_30 + stacked_bar_plot_30 +
+   plot_layout(widths = c(2, 1))
+
+```
+
+```{r}
+my_cols = brewer.pal(4,"Paired")
+DimPlot(all_tissues_seurat_30, group.by='orig.ident',reduction = "umap",
+                          shape.by = "tissue", raster = FALSE, cols=alpha(my_cols,0.6),pt.size=1) + 
+  theme(legend.title=element_blank(), legend.position = "bottom")
+
+
+
+ggplot(percentages_30, aes(x = seurat_clusters, y = Percentage, fill = orig.ident)) +
+  geom_bar(stat = "identity", width = 0.60, position=position_dodge()) +
+  labs(
+    x = "Cluster",
+    y = "Percentage of Cells",
+    fill = "Tissue"
+  ) +
+  ggtitle("Percentage of Cells (Dim 1:30)") +
+  scale_y_continuous(breaks=seq(0, 30, 5)) +
+  scale_fill_brewer(palette = "Paired") +
+  theme_bw() +
+  theme(legend.position = "right")
+
+```
+
+
+#### 4.3.1.3 Finding Markers
+
+```{r}
+## RUN TO RESET VARIABLES ##
+
+# Define the range for i
+start_value <- 0
+end_value <- 14  # Adjust as needed
+
+# Loop through the range and remove variables
+for (i in start_value:end_value) {
+    rm(list = ls(pattern = paste0("all.tissues.cluster_30.", i, ".markers")), envir = .GlobalEnv)
+}
+
+
+```
+
+```{r}
+
+DefaultAssay(all_tissues_seurat) <- "RNA"
+number_of_clusters <- 14
+
+for (i in 0:(number_of_clusters - 1)) {
+  cluster_marker = FindMarkers(all_tissues_seurat_30, ident.1 = i)
+  cluster_marker$pct.diff <- cluster_marker$pct.1 - cluster_marker$pct.2
+  
+  # Dynamically naming the data frames
+  df_name <- paste("all.tissues.cluster_30.", i, ".markers", sep = "")
+  assign(df_name, cluster_marker)
+}
+
+
+```
+
+```{r}
+# Define the range of cluster numbers
+cluster_start <- 0
+cluster_end <- 13
+
+for (cluster_number in cluster_start:cluster_end) {
+  df_name <- paste0("all.tissues.cluster_30.", cluster_number, ".markers")
+  final_df_name <- paste0("all_tissues_cluster_30_", cluster_number)
+  
+  # Convert row names to a column 'ID'
+  current_df <- data.frame(ID = row.names(get(df_name)), get(df_name), row.names = NULL)
+  
+  # Create an index to match IDs from the current dataframe to the mapping dataframe
+  idx <- match(current_df$ID, human_uniprot.map$AnnotID)
+  
+  # Use the index to add the matching rows from map_ids to the current dataframe
+  # Including handling NA for unmatched rows
+  current_df$GeneSymbol <- ifelse(!is.na(idx), human_uniprot.map$`Gene Symbol`[idx], NA)
+  current_df$UniprotID <- ifelse(!is.na(idx), human_uniprot.map$`Uniprot ID`[idx], NA)
+  current_df$UniprotDescription <- ifelse(!is.na(idx), human_uniprot.map$`Uniprot Description`[idx], NA)
+  
+  # Assign the modified dataframe to the final dataframe name
+  assign(final_df_name, current_df)
+  
+  # Export the final dataframe to CSV
+  export_path <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/02_INTEGRATION_30/01_MARKERS/", final_df_name, ".csv")
+  write.csv(get(final_df_name), file = export_path, row.names = FALSE)
+}
+
+```
+
+Adding more gene info based on all uniprot reviewed data base
+
+```{r}
+# First, ensure additional_metadata has unique IDs
+# This example keeps the first occurrence of each ID
+all_uniprot.map <- all_uniprot.map[!duplicated(all_uniprot.map$ID), ]
+
+# Define the range of cluster numbers
+cluster_start <- 0
+cluster_end <- 14
+
+# Loop to add additional metadata to each final dataframe
+for (cluster_number in cluster_start:cluster_end) {
+  final_df_name <- paste0("all_tissues_cluster_30_", cluster_number)
+  
+  # Check if the final dataframe exists in the environment
+  if(exists(final_df_name)) {
+    # Retrieve the final dataframe from the previous loop
+    final_df <- get(final_df_name)
+    
+    # Merge the additional metadata into the final dataframe based on the 'ID' column
+    # Using the unique version of additional_metadata
+    updated_final_df <- merge(final_df, all_uniprot.map, by = "ID", all.x = TRUE)
+    
+    # Reassign the updated dataframe back to the same variable name
+    assign(final_df_name, updated_final_df)
+    
+    # Export the updated final dataframe to CSV (overwriting the previous file)
+    # export_path <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/", final_df_name, ".csv")
+    # write.csv(updated_final_df, file = export_path, row.names = FALSE)
+  }
+}
+
+print("All data frames have been updated with additional metadata and exported.")
+
+```
+
+##### Exporting markers info to excel
+
+```{r}
+
+#library(openxlsx)
+
+# Define the range of cluster numbers
+cluster_start <- 0
+cluster_end <- 13
+
+# Specify the path for the output Excel file
+output_excel_file <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/02_INTEGRATION_30/01_MARKERS/Cluster_Markers_and_Metadata_Annotv4_Integration_30.xlsx")
+
+# Create a new workbook
+wb <- createWorkbook()
+
+# Loop to add each data frame to a separate sheet in the workbook
+for (cluster_number in cluster_start:cluster_end) {
+  final_df_name <- paste0("all_tissues_cluster_30_", cluster_number)
+  
+  # Check if the data frame exists in the environment
+  if(exists(final_df_name)) {
+    # Retrieve the data frame
+    final_df <- get(final_df_name)
+    
+    # Add a sheet to the workbook with the data frame, named by the cluster number
+    addWorksheet(wb, sheetName = paste("Cluster", cluster_number))
+    writeData(wb, sheet = paste("Cluster", cluster_number), x = final_df)
+  }
+}
+
+# Save the workbook to the specified Excel file
+saveWorkbook(wb, file = output_excel_file, overwrite = TRUE)
+
+print(paste("Excel file with cluster data has been saved to", output_excel_file))
+
+
+```
+
+
+#### 4.3.2.1 Non-Integrated All Tissues
+
+```{r}
+DefaultAssay(all_tissues_seurat) <- "RNA"
+all_tissues_seurat <- FindVariableFeatures(all_tissues_seurat, selection.method = "vst", nfeatures = 2000)
+all_tissues_seurat <- ScaleData(all_tissues_seurat)
+all_tissues_seurat <- RunPCA(all_tissues_seurat, npcs = 50)
+all_tissues_seurat <- RunUMAP(all_tissues_seurat, dims = 1:20)
+all_tissues_seurat <- FindNeighbors(all_tissues_seurat, dims = 1:20) %>% FindClusters(resolution = 0.6)
+
+
+```
+
+```{r}
+
+DimPlot(all_tissues_seurat, reduction = "umap", label = T)
+
+```
+
+
+```{r}
+
+
+DimPlot(all_tissues_seurat, reduction = "umap", group.by = "orig.ident", raster = FALSE, cols=alpha(my_cols,0.6))
+
+```
+
+## 4.4 Sample 1 
+
+```{r}
+
+sample1_list <- list()
+sample1_list[["M1"]] <- m1_seurat.obj
+sample1_list[["R1"]] <- r1_seurat.obj
+
+for (i in 1:length(sample1_list)) {
+  sample1_list[[i]] <- NormalizeData(sample1_list[[i]])
+  sample1_list[[i]] <- FindVariableFeatures(sample1_list[[i]], nfeatures = 2000)
+}
+
+```
+
+- Identify anchors in the data sets.
+
+```{r}
+
+sample1_anchors <- FindIntegrationAnchors(object.list = sample1_list, dims = 1:20)
+
+```
+
+- Perform expression level correction.
+
+```{r}
+
+sample1_seurat <- IntegrateData(anchorset = sample1_anchors, dims = 1:20)
+
+```
+
+
+```{r}
+
+sample1_seurat <- ScaleData(sample1_seurat)
+sample1_seurat <- RunPCA(sample1_seurat, npcs = 50)
+sample1_seurat <- RunUMAP(sample1_seurat, dims = 1:20)
+sample1_seurat <- FindNeighbors(sample1_seurat, dims = 1:20) %>% FindClusters(resolution = 0.6)
+
+# # You may also want to save the object
+# saveRDS(seurat, file="integrated_seurat.rds")
+
+# DefaultAssay(mesentery_seurat) <- "integrated"
+# mesentery_seurat <- ScaleData(mesentery_seurat, verbose = F)
+# mesentery_seurat <- RunPCA(mesentery_seurat, npcs = 20, verbose = F)
+# mesentery_seurat <- RunUMAP(mesentery_seurat, reduction = "pca", dims = 1:20, verbose = F)
+
+```
+
+```{r}
+
+DimPlot(sample1_seurat, reduction = "umap", label=T)
+
+```
+
+
+```{r}
+
+DimPlot(sample1_seurat, reduction = "umap", group.by = "orig.ident", raster = FALSE, cols=alpha(my_cols,0.6))
+
+```
+### 4.1.2 Non-Integrated Mesentery
+
+```{r}
+DefaultAssay(sample1_seurat) <- "RNA"
+sample1_seurat <- FindVariableFeatures(sample1_seurat, selection.method = "vst", nfeatures = 2000)
+sample1_seurat <- ScaleData(sample1_seurat)
+sample1_seurat <- RunPCA(sample1_seurat, npcs = 50)
+sample1_seurat <- RunUMAP(sample1_seurat, dims = 1:20)
+sample1_seurat <- FindNeighbors(sample1_seurat, dims = 1:20) %>% FindClusters(resolution = 0.6)
+
+
+```
+
+
+```{r}
+
+DimPlot(sample1_seurat, reduction = "umap", label=T)
+
+```
+
+```{r}
+
+DimPlot(sample1_seurat, reduction = "umap", group.by = "orig.ident", raster = FALSE, cols=alpha(my_cols,0.6))
+
+```
+
+## 4.5 Sample 1 
+
+```{r}
+
+sample2_list <- list()
+sample2_list[["M2"]] <- m2_seurat.obj
+sample2_list[["R2"]] <- r2_seurat.obj
+
+for (i in 1:length(sample2_list)) {
+  sample2_list[[i]] <- NormalizeData(sample2_list[[i]])
+  sample2_list[[i]] <- FindVariableFeatures(sample2_list[[i]], nfeatures = 2000)
+}
+
+```
+
+- Identify anchors in the data sets.
+
+```{r}
+
+sample2_anchors <- FindIntegrationAnchors(object.list = sample2_list, dims = 1:20)
+
+```
+
+- Perform expression level correction.
+
+```{r}
+
+sample2_seurat <- IntegrateData(anchorset = sample2_anchors, dims = 1:20)
+
+```
+
+
+```{r}
+
+sample2_seurat <- ScaleData(sample2_seurat)
+sample2_seurat <- RunPCA(sample2_seurat, npcs = 50)
+sample2_seurat <- RunUMAP(sample2_seurat, dims = 1:20)
+sample2_seurat <- FindNeighbors(sample2_seurat, dims = 1:20) %>% FindClusters(resolution = 0.6)
+
+# # You may also want to save the object
+# saveRDS(seurat, file="integrated_seurat.rds")
+
+# DefaultAssay(mesentery_seurat) <- "integrated"
+# mesentery_seurat <- ScaleData(mesentery_seurat, verbose = F)
+# mesentery_seurat <- RunPCA(mesentery_seurat, npcs = 20, verbose = F)
+# mesentery_seurat <- RunUMAP(mesentery_seurat, reduction = "pca", dims = 1:20, verbose = F)
+
+```
+
+```{r}
+
+DimPlot(sample2_seurat, reduction = "umap", label=T)
+
+```
+
+
+```{r}
+
+DimPlot(sample2_seurat, reduction = "umap", group.by = "orig.ident", raster = FALSE, cols=alpha(my_cols,0.6))
+
+```
+
+### 4.1.2 Non-Integrated Mesentery
+
+```{r}
+DefaultAssay(sample2_seurat) <- "RNA"
+sample2_seurat <- FindVariableFeatures(sample2_seurat, selection.method = "vst", nfeatures = 2000)
+sample2_seurat <- ScaleData(sample2_seurat)
+sample2_seurat <- RunPCA(sample2_seurat, npcs = 50)
+sample2_seurat <- RunUMAP(sample2_seurat, dims = 1:20)
+sample2_seurat <- FindNeighbors(sample2_seurat, dims = 1:20) %>% FindClusters(resolution = 0.6)
+
+
+```
+
+
+```{r}
+
+DimPlot(sample2_seurat, reduction = "umap", label=T)
+
+```
+
+```{r}
+
+DimPlot(sample2_seurat, reduction = "umap", group.by = "orig.ident", raster = FALSE, cols=alpha(my_cols,0.6))
+
+```

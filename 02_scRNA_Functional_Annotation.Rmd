@@ -1,0 +1,1500 @@
+---
+title: "02_scRNAseq_Functional_Annotation"
+author: "Joshua G. Medina-Feliciano"
+date: "2024-01-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '/Users/joshuagmedina/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/08-SCRNA-HGLABv4/')
+```
+
+# 1.0 Setting Up Environment
+
+## 1.1 Loading packages
+```{r}
+
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(DESeq2)
+library(SoupX)
+library(hdf5r)
+library(scCustomize)
+library(DropletUtils)
+library(cowplot)
+library(metap)
+library(scater)
+library(TSCAN)
+library(readr)
+library(RColorBrewer)
+library(patchwork)
+library(tidyverse)
+library(ggnewscale)
+library(reshape2)
+library(pcaMethods)
+library(velocyto.R)
+library(SeuratWrappers)
+library(SeuratDisk)
+library(AnnotationHub)
+library(clusterProfiler)
+library(DOSE)
+library(org.Hs.eg.db)
+library(decoupleR)
+```
+
+## 1.2 Set Working Directory
+
+```{r}
+ # 
+ # setwd("/Users/joshuagmedina/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/")
+ # 
+```
+
+
+# 1.3 Load Seurat object
+
+```{r}
+# 
+# all.combined <- readRDS(file = "./sobj_tissue_comb_08res.v1.rds")
+# 
+```
+
+- Check if data looks good in terms of previous cluster visualizations.
+
+```{r}
+
+DimPlot(all_tissues_seurat, reduction = "umap", label = TRUE)
+
+```
+
+
+# 2. Prepare reference files
+
+## 2.1 Import human Uniprot metadata
+```{r}
+
+human_uniprot.metadata <- read_delim(
+  file = "00_REFS/01_HUMAN_UNIPROT/UP000005640_9606.hsapUniprot.metadata.tsv", 
+  delim = "\t", 
+  col_names = TRUE)
+
+
+head(human_uniprot.metadata)
+
+```
+
+## 2.2 Import features table for Humans
+
+```{r}
+
+human_ncbi.metadata <- read_delim(
+  file = "/Users/joshuagmedina/Dropbox/02-PHD_THESIS/07-REF-GENOME-ARTICLE/01-ANALYSES/00-DATA/03-REFGENOME_V1_FUNCTIONAL_ANNOT/02-FUNCTIONAL_ANNOT_REF_HUMANS/00-REF/GCF_000001405.40_GRCh38.p14_feature_table.txt", 
+  delim = "\t", 
+  col_names = TRUE)
+
+head(human_ncbi.metadata)
+
+```
+
+```{r}
+
+human_ncbi.metadata_subset <- human_ncbi.metadata %>% filter(class == "with_protein") %>% dplyr::select(product_accession, GeneID)
+
+head(human_ncbi.metadata_subset)
+
+```
+
+
+## 2.4 Import Human BLASTp results
+
+```{r}
+
+hsap_blastp.df <- read_delim(
+  file = "00_REFS/02_HUMAN_NCBI/augustus_hints_w_utr.v4.human_ncbi.map.tsv", 
+  delim = "\t", 
+  col_names = FALSE)
+
+colnames(hsap_blastp.df) <- c('qseqid', 'product_accession')
+hsap_blastp.df$qseqid <- sub("\\..*$", "", hsap_blastp.df$qseqid)
+head(hsap_blastp.df)
+
+```
+
+### 2.4.1 Creating mapping data frame
+
+```{r}
+
+hsap_blastp.df <- hsap_blastp.df[!duplicated(hsap_blastp.df$qseqid), ]
+
+hsap_mapping_df_tmp <- inner_join(hsap_blastp.df, human_ncbi.metadata_subset, by = "product_accession")
+hasap_geneID_mapping_df <- hsap_mapping_df_tmp %>% dplyr::select(qseqid, GeneID)
+
+head(hasap_geneID_mapping_df)
+
+```
+
+## 2.5 Get gene names per cluster
+
+- The below loop will iterate through all the data frames that contain the fold change difference between the expression of each cluster against all others.
+
+```{r}
+## RUN TO RESET VARIABLES ##
+
+# Define the range for i
+start_value <- 0
+end_value <- 14  # Adjust as needed
+
+# Loop through the range and remove variables
+for (i in start_value:end_value) {
+    rm(list = ls(pattern = paste0("^(all_comb\\.cluster", i, "\\.exp|c", i, "_gls)$")), envir = .GlobalEnv)
+}
+
+
+```
+
+
+```{r}
+
+# Loop through cluster numbers 0 to 14
+for (i in 0:12) {
+  # Dynamically create variable names
+  marker_var_name <- paste0("all.tissues.cluster", i, ".markers")
+  exp_var_name <- paste0("all.tissues.cluster", i, ".exp")
+  gls_var_name <- paste0("c", i, "_gls")
+
+  # Perform operations
+  df <- get(marker_var_name) %>%
+        arrange(desc(avg_log2FC)) %>%
+        tibble::rownames_to_column("qseqid") %>%
+        inner_join(hasap_geneID_mapping_df, by = "qseqid") %>%
+        filter(!duplicated(GeneID))
+
+  # Extracting and naming the log2 fold change vector
+  gls <- sort(df$avg_log2FC, decreasing = TRUE)
+  names(gls) <- df$GeneID
+
+  # Assign the data frame and vector to new variables
+  assign(exp_var_name, df)
+  assign(gls_var_name, gls)
+}
+
+```
+
+- Check that everything is in order.
+
+```{r}
+
+tail(c0_gls)
+
+```
+
+# 3. Gene Set Enrichment analysis for Gene Ontology
+*Based on Biological Processes*
+
+```{r}
+
+# Loop through each gene list from c0_gls to c14_gls
+for (i in 0:12) {
+  # Dynamically create the name of the gene list variable
+  gls_var_name <- paste0("c", i, "_gls")
+
+  # Retrieve the gene list
+  gene_list <- get(gls_var_name)
+
+  # Perform Gene Set Enrichment Analysis
+  gse_result_var_name <- paste0("gse_c", i)
+  gse_result <- gseGO(geneList = gene_list, 
+                      ont = "ALL", 
+                      keyType = "ENTREZID",
+                      eps = 0,
+                      pvalueCutoff = 0.05,
+                      verbose = TRUE, 
+                      OrgDb = org.Hs.eg.db, 
+                      pAdjustMethod = "BH")
+  
+  # Assign the result to a new variable
+  assign(gse_result_var_name, gse_result)
+
+  # Convert the result to a data frame
+  gse_df_var_name <- paste0(gse_result_var_name, "_df")
+  gse_df <- as.data.frame(gse_result)
+
+  # Assign the data frame to a new variable
+  assign(gse_df_var_name, gse_df)
+}
+
+```
+
+*Based on Molecular Function*
+
+```{r}
+
+# Loop through each gene list from c0_gls to c14_gls
+for (i in 0:12) {
+  # Dynamically create the name of the gene list variable
+  gls_var_name <- paste0("c", i, "_gls")
+
+  # Retrieve the gene list
+  gene_list <- get(gls_var_name)
+
+  # Perform Gene Set Enrichment Analysis
+  gse_result_var_name <- paste0("gse_mf_c", i)
+  gse_result <- gseGO(geneList = gene_list, 
+                      ont = "MF", 
+                      keyType = "ENTREZID",
+                      eps = 0,
+                      pvalueCutoff = 0.05,
+                      verbose = TRUE, 
+                      OrgDb = org.Hs.eg.db, 
+                      pAdjustMethod = "BH")
+  
+  # Assign the result to a new variable
+  assign(gse_result_var_name, gse_result)
+
+  # Convert the result to a data frame
+  gse_df_var_name <- paste0(gse_result_var_name, "_df")
+  gse_df <- as.data.frame(gse_result)
+
+  # Assign the data frame to a new variable
+  assign(gse_df_var_name, gse_df)
+}
+
+```
+# 3.1 Gene Set Enrichment analysis of KEGG Pathways
+
+```{r}
+
+# Loop through each gene list from c0_gls to c14_gls
+for (i in 0:12) {
+  # Dynamically create the name of the gene list variable
+  gls_var_name <- paste0("c", i, "_gls")
+
+  # Retrieve the gene list
+  gene_list <- get(gls_var_name)
+
+  # Perform Gene Set Enrichment Analysis
+  gse_result_var_name <- paste0("gse_kegg_c", i)
+  gse_result <- gseKEGG(geneList = gene_list, 
+                      keyType = "ncbi-geneid",
+                      pvalueCutoff = 0.05,
+                      verbose = TRUE, 
+  #                    OrgDb = org.Hs.eg.db, 
+                      pAdjustMethod = "BH")
+  
+  # Assign the result to a new variable
+  assign(gse_result_var_name, gse_result)
+
+  # Convert the result to a data frame
+  gse_df_var_name <- paste0(gse_result_var_name, "_df")
+  gse_df <- as.data.frame(gse_result)
+
+  # Assign the data frame to a new variable
+  assign(gse_df_var_name, gse_df)
+}
+
+```
+
+## 3.1 Map Entrez ID to H. glaberrima IDs
+
+```{r}
+
+
+colnames(hasap_geneID_mapping_df)[colnames(hasap_geneID_mapping_df) == "GeneID"] <- "core_enrichment"
+
+head(hasap_geneID_mapping_df)
+
+
+```
+
+## 3.2. Iterate through all df to map ids
+
+```{r}
+
+# Function to map each gene ID based on a mapping data frame
+map_ids <- function(ids, mapping_df) {
+  sapply(ids, function(id) {
+    mapped_id <- mapping_df$qseqid[mapping_df$core_enrichment == id]
+    if (length(mapped_id) == 0) {
+      return(id)
+    } else {
+      return(mapped_id)
+    }
+  })
+}
+
+# Get the list of all variable names that start with "go.ls_entrez."
+variable_names <- ls(pattern = "^gse_c(1[0-4]|[0-9])_df$")
+
+# Loop through each variable
+for (var_name in variable_names) {
+  # Get the data frame
+  df <- get(var_name)
+  
+  # Split the gene IDs
+  split_ids <- strsplit(df$core_enrichment, "/")
+
+  # Map the IDs and create a new column
+  mapped_ids <- sapply(split_ids, function(ids) paste(map_ids(ids, hasap_geneID_mapping_df), collapse = "/"))
+  df$mapped_gene_id <- mapped_ids
+
+  # Assign the modified data frame back to the variable
+  assign(var_name, df)
+}
+
+
+```
+
+## 3.3. Exporting gseGO lists.
+
+```{r}
+
+variable_names <- ls(pattern = "^gse_c(1[0-4]|[0-9])_df$")
+
+# Directory path where the CSV files will be saved
+dir_path <- "02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/02_gseGO"
+
+# Check if the directory exists; if not, create it
+if (!dir.exists(dir_path)) {
+  dir.create(dir_path, recursive = TRUE)
+}
+
+# Loop through each variable
+for (var_name in variable_names) {
+  # Retrieve the data frame from the variable name
+  df <- get(var_name)
+
+  # Construct the file path for the CSV file
+  file_path <- file.path(dir_path, paste0(var_name, ".csv"))
+
+  # Write the data frame to a CSV file
+  write.csv(df, file_path, row.names = FALSE)
+}
+
+```
+
+```{r}
+
+#library(openxlsx)
+
+# Define the range of cluster numbers
+cluster_start <- 0
+cluster_end <- 12
+
+# Specify the path for the output Excel file
+output_excel_file <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/02_gseGO/gseGO_BP_Hglabv4_Dim20.xlsx")
+
+# Create a new workbook
+wb <- createWorkbook()
+
+# Loop to add each data frame to a separate sheet in the workbook
+for (cluster_number in cluster_start:cluster_end) {
+  final_df_name <- paste0("gse_c", cluster_number,"_df")
+  
+  # Check if the data frame exists in the environment
+  if(exists(final_df_name)) {
+    # Retrieve the data frame
+    final_df <- get(final_df_name)
+    
+    # Add a sheet to the workbook with the data frame, named by the cluster number
+    addWorksheet(wb, sheetName = paste("Cluster", cluster_number))
+    writeData(wb, sheet = paste("Cluster", cluster_number), x = final_df)
+  }
+}
+
+# Save the workbook to the specified Excel file
+saveWorkbook(wb, file = output_excel_file, overwrite = TRUE)
+
+print(paste("Excel file with cluster data has been saved to", output_excel_file))
+
+```
+
+
+
+## Dotplot of gseGO across clusters
+
+```{r}
+library(tidyr)
+# Create a list to hold all data frames
+df_list <- list(gse_c0_df, gse_c1_df, gse_c2_df, gse_c3_df, gse_c4_df, gse_c5_df, gse_c6_df, gse_c7_df, gse_c8_df, gse_c9_df, gse_c10_df, gse_c11_df, gse_c12_df)
+
+# Add a group identifier to each data frame and combine them
+combined_df <- bind_rows(lapply(1:length(df_list), function(i) {
+  df_list[[i]] %>%
+    mutate(Group = paste("", i - 1)) %>%
+    dplyr::select(Description, Group, enrichmentScore, p.adjust) %>%
+    top_n(2, wt = enrichmentScore)
+}))
+
+# combined_df <- combined_df %>%
+#   mutate(Description = factor(Description, levels = unique(Description))) %>%
+#   arrange(desc(Group), Description) %>%
+#   mutate(Description = fct_inorder(Description))
+# 
+# combined_df <- combined_df %>%
+#   # Extract numeric part from the Group and convert to numeric
+#   mutate(ClusterNumber = as.numeric(gsub("Cluster ", "", Group))) %>%
+#   # Arrange by this numeric part to ensure correct order
+#   arrange(ClusterNumber) %>%
+#   # Convert back to factor with levels in the correct order
+#   mutate(Group = factor(Group, levels = unique(Group)))
+
+combined_df <- combined_df %>%
+  # Extract numeric part from the Group and convert to numeric
+  mutate(ClusterNumber = as.numeric(gsub("Cluster ", "", Group))) %>%
+  # Convert Group to a factor with levels ordered numerically based on ClusterNumber
+  mutate(Group = factor(Group, levels = unique(Group[order(ClusterNumber)]))) %>%
+  # Arrange by ClusterNumber to get correct X-axis order
+  arrange(ClusterNumber) %>%
+  # For Y-axis: arrange by desc(Group) to get Descriptions in decreasing order by their cluster appearance
+  arrange(desc(ClusterNumber)) %>%
+  # Ensure Descriptions are treated in the order they appear, which now reflects desired Y-axis order
+  mutate(Description = factor(Description, levels = unique(Description)))
+
+
+
+# Now, create the dot plot
+ggplot(combined_df, aes(x = Group, y = Description, size = enrichmentScore, color = p.adjust)) +
+  geom_point(alpha = 0.7) +  # Adjust transparency with alpha
+  scale_size(range = c(1, 5)) +  # Adjust size range of dots
+  scale_color_gradient(low = "blue", high = "red") +  # Adjust color gradient
+  theme_bw() +
+  labs(title = "Top 2 GO Terms Enrichment per Cluster",
+       x = "Cluster",
+       y = "GO Term Description",
+       size = "Enrichment Score",
+       color = "Adjusted P-Value") +
+  theme(axis.text.x = element_text(color = "black", size = 10),
+        axis.text.y = element_text(color = "black", size = 12),
+        legend.position = "right")
+
+# Note: Adjust the scale_size and scale_color_gradient parameters as necessary
+
+
+```
+
+```{r}
+
+# Create a list to hold all data frames
+df_list <- list(gse_c0_df, gse_c1_df, gse_c2_df, gse_c3_df, gse_c4_df, gse_c5_df, gse_c6_df, gse_c7_df, gse_c8_df, gse_c9_df, gse_c10_df, gse_c11_df, gse_c12_df)
+
+# Add a group identifier to each data frame and combine them
+combined_df <- bind_rows(lapply(1:length(df_list), function(i) {
+  df_list[[i]] %>%
+    mutate(Group = paste("", i - 1)) %>%
+    dplyr::select(Description, Group, enrichmentScore, p.adjust) %>%
+    top_n(5, wt = enrichmentScore)
+}))
+
+# combined_df <- combined_df %>%
+#   mutate(Description = factor(Description, levels = unique(Description))) %>%
+#   arrange(desc(Group), Description) %>%
+#   mutate(Description = fct_inorder(Description))
+# 
+# combined_df <- combined_df %>%
+#   # Extract numeric part from the Group and convert to numeric
+#   mutate(ClusterNumber = as.numeric(gsub("Cluster ", "", Group))) %>%
+#   # Arrange by this numeric part to ensure correct order
+#   arrange(ClusterNumber) %>%
+#   # Convert back to factor with levels in the correct order
+#   mutate(Group = factor(Group, levels = unique(Group)))
+
+combined_df <- combined_df %>%
+  # Extract numeric part from the Group and convert to numeric
+  mutate(ClusterNumber = as.numeric(gsub("Cluster ", "", Group))) %>%
+  # Convert Group to a factor with levels ordered numerically based on ClusterNumber
+  mutate(Group = factor(Group, levels = unique(Group[order(ClusterNumber)]))) %>%
+  # Arrange by ClusterNumber to get correct X-axis order
+  arrange(ClusterNumber) %>%
+  # For Y-axis: arrange by desc(Group) to get Descriptions in decreasing order by their cluster appearance
+  arrange(desc(ClusterNumber)) %>%
+  # Ensure Descriptions are treated in the order they appear, which now reflects desired Y-axis order
+  mutate(Description = factor(Description, levels = unique(Description)))
+
+
+
+# Now, create the dot plot
+ggplot(combined_df, aes(x = Group, y = Description, size = enrichmentScore, color = p.adjust)) +
+  geom_point(alpha = 0.7) +  # Adjust transparency with alpha
+  scale_size(range = c(1, 6)) +  # Adjust size range of dots
+  scale_color_gradient(low = "blue", high = "red") +  # Adjust color gradient
+  theme_bw() +
+  labs(title = "Top 5 GO Terms Enrichment per Cluster",
+       x = "Cluster",
+       y = "GO Term Description",
+       size = "Enrichment Score",
+       color = "Adjusted P-Value") +
+  theme(axis.text.x = element_text(color = "black", size = 10),
+        axis.text.y = element_text(color = "black", size = 8),
+        legend.position = "right")
+
+```
+
+
+
+## 3.5 Test differences across multiple clusters.
+
+```{r}
+
+gsedf_list <- list(c1 = gse_c1_df, c2 = gse_c2_df, 
+                       c3 = gse_c3_df, c4 = gse_c4_df,
+                       c6 = gse_c6_df, c14 = gse_c14_df)
+
+gsedf_merged <- bind_rows(gsedf_list, .id = "source_dataframe")
+
+gsedf_merged <- gsedf_merged %>%
+  arrange(ID, desc(enrichmentScore))
+
+# Identify IDs that appear in more than one group
+ids_in_multiple_groups <- gsedf_merged %>%
+  group_by(ID) %>%
+  summarize(n_groups = n_distinct(source_dataframe)) %>%
+  filter(n_groups > 1) %>%
+  pull(ID)
+
+# Remove rows with these IDs from the original dataframe
+gsedf_merged_filtered <- gsedf_merged %>%
+  filter(!(ID %in% ids_in_multiple_groups))
+
+
+gsedf_merged_filtered <- gsedf_merged_filtered %>%
+  arrange(source_dataframe, desc(enrichmentScore))
+
+```
+
+### Export filtered gseGO data frames.
+
+```{r}
+library(openxlsx)
+# Split the dataframe by the group column
+gsedf_merged_ls_groups <- split(gsedf_merged_filtered, gsedf_merged_filtered$source_dataframe)
+
+# Iterate over each group and write to a CSV file
+for (group_name in names(gsedf_merged_ls_groups)) {
+  file_name <- paste0("02_RESULTS/filtered_gseGO_", group_name, ".csv")  # Construct the file name
+  write.csv(gsedf_merged_ls_groups[[group_name]], file_name, row.names = FALSE)
+}
+
+## EXCEL FILE
+
+# Create a new workbook
+wb <- createWorkbook()
+
+# Iterate over each group and add a sheet with the group's data
+for (group_name in names(gsedf_merged_ls_groups)) {
+  addWorksheet(wb, sheetName = group_name)
+  writeData(wb, sheet = group_name, gsedf_merged_ls_groups[[group_name]])
+}
+
+# Save the workbook as an Excel file
+saveWorkbook(wb, "02_RESULTS/gseGO_filtered.xlsx", overwrite = TRUE)
+
+```
+
+
+
+## 3.6 GO of Mesenchyme
+
+```{r}
+
+
+# Create a list to hold all data frames
+df_list <- list(gse_c0_df, gse_c1_df, gse_c3_df, gse_c4_df)
+
+# Add a group identifier to each data frame and combine them
+combined_df <- bind_rows(lapply(1:length(df_list), function(i) {
+  df_list[[i]] %>%
+    mutate(Group = paste("", i - 1)) %>%
+    dplyr::select(Description, Group, enrichmentScore, p.adjust) %>%
+    top_n(5, wt = enrichmentScore)
+}))
+
+combined_df <- combined_df %>%
+  # Extract numeric part from the Group and convert to numeric
+  mutate(ClusterNumber = as.numeric(gsub("Cluster ", "", Group))) %>%
+  # Convert Group to a factor with levels ordered numerically based on ClusterNumber
+  mutate(Group = factor(Group, levels = unique(Group[order(ClusterNumber)]))) %>%
+  # Arrange by ClusterNumber to get correct X-axis order
+  arrange(ClusterNumber) %>%
+  # For Y-axis: arrange by desc(Group) to get Descriptions in decreasing order by their cluster appearance
+  arrange(desc(ClusterNumber)) %>%
+  # Ensure Descriptions are treated in the order they appear, which now reflects desired Y-axis order
+  mutate(Description = factor(Description, levels = unique(Description)))
+
+
+
+# Now, create the dot plot
+ggplot(combined_df, aes(x = Group, y = Description, size = enrichmentScore, color = p.adjust)) +
+  geom_point(alpha = 0.7) +  # Adjust transparency with alpha
+  scale_size(range = c(1, 6)) +  # Adjust size range of dots
+  scale_color_gradient(low = "blue", high = "red") +  # Adjust color gradient
+  theme_bw() +
+  labs(title = "Top 5 GO Terms Enrichment per Cluster",
+       x = "Cluster",
+       y = "GO Term Description",
+       size = "Enrichment Score",
+       color = "Adjusted P-Value") +
+  theme(axis.text.x = element_text(color = "black", size = 10),
+        axis.text.y = element_text(color = "black", size = 8),
+        legend.position = "right")
+
+
+```
+
+
+# 4. Compare GO
+
+## 4.1 Combine data from all clusters of interest.
+
+```{r}
+
+markersdf_list <- list(c1 = all_comb.cluster1.exp, c2 = all_comb.cluster2.exp, 
+                       c3 = all_comb.cluster3.exp, c4 = all_comb.cluster4.exp,
+                       c6 = all_comb.cluster6.exp, c14 = all_comb.cluster14.exp)
+
+markersdf_merged <- bind_rows(markersdf_list, .id = "source_dataframe")
+markersdf_merged <- markersdf_merged %>% 
+  dplyr::select(core_enrichment, avg_log2FC, source_dataframe) %>% 
+  rename('Entrez' = 'core_enrichment', 'logFC' = 'avg_log2FC', 'group' = 'source_dataframe')
+
+cluster.comparison <- compareCluster(Entrez~group, data = markersdf_merged,
+                                     fun='enrichGO', OrgDb = 'org.Hs.eg.db')
+cluster.comparison.df <- as.data.frame(cluster.comparison)
+
+```
+
+```{r}
+
+dotplot(cluster.comparison, showCategory = 10, font.size = 8)
+
+```
+
+# 5. CellChat
+
+```{r}
+library(ComplexHeatmap)
+library(presto)
+library(CellChat)
+library(NMF)
+```
+*Matrix Data*
+
+```{r}
+
+reg_tissues <- all_tissues_seurat
+DefaultAssay(reg_tissues) <- "RNA"
+dim(reg_tissues)
+
+```
+
+```{r}
+
+reg_tissues_mtx <- as.matrix(reg_tissues@assays$RNA@data)
+head(reg_tissues_mtx[1:20,1:20])
+
+```
+
+
+*Mapping Table*
+
+```{r}
+
+human_ncbi.metadata_symbols_subset <- human_ncbi.metadata %>% filter(class == "with_protein") %>% dplyr::select(product_accession, symbol)
+
+head(human_ncbi.metadata_symbols_subset)
+
+
+```
+
+```{r}
+
+
+hsap_symbol_mapping_df_tmp <- inner_join(hsap_blastp.df, human_ncbi.metadata_symbols_subset, by = "product_accession")
+hasap_symbol_mapping_df <- hsap_symbol_mapping_df_tmp %>% dplyr::select(symbol, qseqid)
+
+head(hasap_symbol_mapping_df)
+dim(hasap_symbol_mapping_df)
+```
+
+*Filter matrix for genes that only have human match*
+```{r}
+
+reg_tissues_mtx <- reg_tissues_mtx[hasap_symbol_mapping_df$qseqid,]
+reg_tissues_mtx[1:10,1:20]
+```
+
+*Change rownames of the matrix*
+```{r}
+
+rownames(reg_tissues_mtx) <- hasap_symbol_mapping_df$symbol
+storage.mode(reg_tissues_mtx) <- "integer"
+reg_tissues_mtx[1:10,1:20]
+```
+
+*Create seurat object*
+
+```{r}
+
+hsap_sobj <- CreateSeuratObject(counts = reg_tissues_mtx, meta.data = reg_tissues@meta.data, )
+dim(hsap_sobj)
+
+hsap_sobj[["umap"]] <- reg_tissues[["umap"]]
+
+Idents(hsap_sobj) <- Idents(reg_tissues)
+ 
+ # Rename identity classes
+hsap_sobj <- RenameIdents(object = hsap_sobj, `0` = "Blastema 1", `1` = "Blastema 2", `2` = "Mesenchymal 1",
+                          `3` = "Blastema 3", `4` = "Coelomic Epithelium", `5` = "Muscle", `6` = "Immune-like 1",
+                          `7` = "Mesenchymal 2", `8` = "Dividing", `9` = "Neuroepithelial",
+                          `10` = "Immune-like 2", `11` = "Immune-like 3", `12` = "Immune-like 4")
+
+# Reorder identity classes 
+levels(x = hsap_sobj) <- c("Blastema 1", "Blastema 2", "Blastema 3", "Mesenchymal 1", "Mesenchymal 2",
+                           "Dividing", "Muscle", "Neuroepithelial", "Coelomic Epithelium", "Immune-like 1",
+                           "Immune-like 2", "Immune-like 3", "Immune-like 4")
+```
+
+```{r}
+# Confirm that everything is in order.
+#library(ggh4x)
+
+axis <- ggh4x::guide_axis_truncated(
+  trunc_lower = unit(0, "npc"),
+  trunc_upper = unit(2, "cm")
+)
+
+DimPlot(hsap_sobj, reduction = "umap", label=F) + 
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank())
+
+FeaturePlot(hsap_sobj, features = "FZD7", min.cutoff = 1, 
+            max.cutoff = 10, pt.size = 1, order = TRUE) &
+  guides(x = axis, y = axis) &
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey75")))
+
+```
+
+
+*Getting data for CellChat*
+
+```{r}
+
+cc_hsap_mtx <- hsap_sobj[["RNA"]]@data # normalized data matrix
+cc_cell_labels <- Idents(hsap_sobj)
+cc_meta <- data.frame(labels = labels, row.names = names(labels)) # create a dataframe of the cell labels
+
+```
+
+```{r}
+
+cellChat <- createCellChat(object = hsap_sobj, group.by = "ident", assay = "RNA")
+
+```
+
+# Ligand-receptor Interaction DB
+
+```{r}
+
+CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
+showDatabaseCategory(CellChatDB)
+
+```
+
+```{r}
+
+CellChatDB.use <- CellChatDB
+cellChat@DB <- CellChatDB.use
+
+```
+
+```{r}
+
+cellChat <- subsetData(cellChat)
+
+```
+
+```{r}
+
+cellChat <- identifyOverExpressedGenes(cellChat)
+cellChat <- identifyOverExpressedInteractions(cellChat)
+
+```
+```{r}
+
+cellChat <- computeCommunProb(cellChat, type = "truncatedMean", trim = 0.1)
+
+```
+```{r}
+
+cellChat <- filterCommunication(cellChat, min.cells = 10, rare.keep = T)
+
+```
+
+
+```{r}
+
+cc_df.net <- subsetCommunication(cellChat)
+#df.net <- subsetCommunication(cellchat, sources.use = c(1,2), targets.use = c(4,5))
+#df.net <- subsetCommunication(cellchat, signaling = c("WNT", "TGFb"))
+```
+
+
+```{r}
+
+cellChat <- computeCommunProbPathway(cellChat)
+
+```
+
+
+```{r}
+cellChat <- aggregateNet(cellChat)
+
+```
+
+
+```{r}
+
+groupSize <- as.numeric(table(cellChat@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(cellChat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellChat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+
+```
+
+
+```{r}
+
+mat <- cellChat@net$weight
+par(mfrow = c(3,5), xpd=TRUE)
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, edge.weight.max = max(mat), title.name = rownames(mat)[i])
+}
+
+```
+
+*Visualization of specific pathways*
+
+```{r}
+
+pathways.show <- c("L1CAM")
+# Hierarchy plot
+# Here we define `vertex.receive` so that the left portion of the hierarchy plot shows signaling to fibroblast and the right portion shows signaling to immune cells 
+vertex.receiver = seq(1,4) # a numeric vector. 
+netVisual_aggregate(cellChat, signaling = pathways.show, vertex.receiver = vertex.receiver)
+# Circle plot
+par(mfrow=c(1,1))
+netVisual_aggregate(cellChat, signaling = pathways.show, layout = "circle")
+
+```
+
+
+```{r}
+netAnalysis_contribution(cellChat, signaling = pathways.show)
+```
+
+
+```{r}
+
+# Access all the signaling pathways showing significant communications
+pathways.show.all <- cellChat@netP$pathways
+# check the order of cell identity to set suitable vertex.receiver
+levels(cellChat@idents)
+vertex.receiver = seq(1,4)
+for (i in 1:length(pathways.show.all)) {
+  # Visualize communication network associated with both signaling pathway and individual L-R pairs
+  netVisual(cellChat, signaling = pathways.show.all[i], vertex.receiver = vertex.receiver, layout = "hierarchy")
+  # Compute and visualize the contribution of each ligand-receptor pair to the overall signaling pathway
+  gg <- netAnalysis_contribution(cellChat, signaling = pathways.show.all[i])
+  ggsave(filename=paste0(pathways.show.all[i], "_L-R_contribution.pdf"), plot=gg, width = 3, height = 2, units = 'in', dpi = 300)
+}
+
+```
+
+
+```{r}
+
+plotGeneExpression(cellChat, signaling = "Netrin", enriched.only = TRUE, type = "dot", color.use = brewer.pal(10,"Accent"))
+plotGeneExpression(cellChat, signaling = "Netrin", enriched.only = TRUE, type = "violin")
+```
+
+
+*Network Centrality Scores*
+
+```{r}
+
+cellChat <- netAnalysis_computeCentrality(cellChat, slot.name = "netP")
+
+```
+
+```{r}
+netAnalysis_signalingRole_network(cellChat, signaling = pathways.show, width = 8, height = 2.5, font.size = 10)
+```
+
+```{r}
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+gg1 <- netAnalysis_signalingRole_scatter(cellChat)
+gg1
+```
+
+
+```{r}
+
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+ht1 <- netAnalysis_signalingRole_heatmap(cellChat, pattern = "outgoing")
+ht2 <- netAnalysis_signalingRole_heatmap(cellChat, pattern = "incoming")
+ht1 + ht2
+
+```
+
+
+# 6. PROGENy
+
+```{r}
+library(progeny)
+library(decoupleR)
+library(OmnipathR)
+
+```
+
+## 6.1 PROGENy Model
+
+```{r}
+
+net <- get_progeny(organism = 'human', top = 500)
+net
+
+```
+
+```{r}
+
+# we will use the matrix previously prepared.
+acts <- run_mlm(mat=reg_tissues_mtx, net=net, .source='source', .target='target',
+                .mor='weight', minsize = 5)
+acts
+
+```
+
+*Saving results to Seurat Object*
+```{r}
+
+hsap_progeny_sobj <- hsap_sobj
+hsap_progeny_sobj[['pathwaysmlm']] <- acts %>%
+  pivot_wider(id_cols = 'source', names_from = 'condition',
+              values_from = 'score') %>%
+  column_to_rownames('source') %>%
+  Seurat::CreateAssayObject(.)
+
+# Change assay
+DefaultAssay(object = hsap_progeny_sobj) <- "pathwaysmlm"
+
+# Scale the data
+hsap_progeny_sobj <- ScaleData(hsap_progeny_sobj)
+hsap_progeny_sobj@assays$pathwaysmlm@data <- hsap_progeny_sobj@assays$pathwaysmlm@scale.data
+
+
+```
+
+
+```{r}
+
+p1 <- DimPlot(hsap_progeny_sobj, reduction = "umap", label = TRUE, pt.size = 0.5) + 
+  NoLegend() + ggtitle('Cell types')
+p2 <- (FeaturePlot(hsap_progeny_sobj, features = c("Trail")) & 
+  scale_colour_gradient2(low = 'blue', mid = 'white', high = 'red')) +
+  ggtitle('Trail activity')
+p1 | p2
+
+```
+
+
+```{r}
+# Extract activities from object as a long dataframe
+
+df <- t(as.matrix(hsap_progeny_sobj@assays$pathwaysmlm@data)) %>%
+  as.data.frame() %>%
+  mutate(cluster = Idents(hsap_progeny_sobj)) %>%
+  pivot_longer(cols = -cluster, names_to = "source", values_to = "score") %>%
+  group_by(cluster, source) %>%
+  summarise(mean = mean(score))
+
+# Transform to wide matrix
+top_acts_mat <- df %>%
+  pivot_wider(id_cols = 'cluster', names_from = 'source',
+              values_from = 'mean') %>%
+  column_to_rownames('cluster') %>%
+  as.matrix()
+
+# Choose color palette
+palette_length = 100
+my_color = colorRampPalette(c("Darkblue", "white","red"))(palette_length)
+
+my_breaks <- c(seq(-2, 0, length.out=ceiling(palette_length/2) + 1),
+               seq(0.05, 2, length.out=floor(palette_length/2)))
+
+# Plot
+pheatmap(top_acts_mat, border_color = NA, color=my_color, breaks = my_breaks)
+```
+
+
+# TESTING STAGE
+
+```{r}
+
+deg.list <- split(rownames(all.combined), f = all.combined$seurat_clusters)
+
+```
+
+## 2.5.1. Convert the gene list obtained to NCBI ids.
+
+```{r}
+
+# Create an empty list to store NCBI IDs
+# ncbi_list <- list()
+
+# # Iterate over each component in your gene list
+# for(i in 1:length(deg.list)) {
+#   # For each gene ID, find the corresponding NCBI ID
+#   ncbi_ids <- sapply(deg.list[[i]], function(x) geneID_mapping_df$GeneID[which(geneID_mapping_df$qseqid == x)])
+#   
+#   # Store the NCBI IDs in the new list
+#   ncbi_list[[i]] <- ncbi_ids
+# }
+
+# for(i in seq_along(deg.list)) {
+#   for(j in seq_along(deg.list[[i]])) {
+#     gene_id <- deg.list[[i]][[j]]
+#     matched_indices <- which(geneID_mapping_df$qseqid == gene_id)
+# 
+#     # Check if any NCBI IDs were found
+#     if(length(matched_indices) > 0) {
+#       # Use only the first matched NCBI ID
+#       ncbi_id <- geneID_mapping_df$GeneID[matched_indices[1]]
+#       deg.list[[i]][[j]] <- ncbi_id
+#     }
+#     # If no match is found, the original gene ID is left unchanged
+#   }
+# }
+
+
+
+
+```
+
+
+```{r}
+# 
+# for(i in seq_along(deg.list)) {
+#   # Initialize a temporary vector to store the matched NCBI IDs
+#   matched_ncbi_ids <- c()
+# 
+#   for(j in seq_along(deg.list[[i]])) {
+#     gene_id <- deg.list[[i]][[j]]
+#     matched_indices <- which(geneID_mapping_df$qseqid == gene_id)
+# 
+#     # If any NCBI IDs were found, add the first matched NCBI ID to the temporary vector
+#     if(length(matched_indices) > 0) {
+#       ncbi_id <- geneID_mapping_df$GeneID[matched_indices[1]]
+#       matched_ncbi_ids <- c(matched_ncbi_ids, ncbi_id)
+#     }
+#     # If no match is found, the gene ID is not added to the temporary vector
+#   }
+# 
+#   # Replace the original component with the vector of matched NCBI IDs
+#   deg.list[[i]] <- matched_ncbi_ids
+# }
+
+
+##
+
+for(i in seq_along(deg.list)) {
+  # Initialize a temporary vector to store the matched NCBI IDs
+  matched_ncbi_ids <- character(0)
+
+  for(j in seq_along(deg.list[[i]])) {
+    gene_id <- deg.list[[i]][[j]]
+    matched_indices <- which(hasap_geneID_mapping_df$qseqid == gene_id)
+
+    # If any NCBI IDs were found, add the first matched NCBI ID to the temporary vector
+    if(length(matched_indices) > 0) {
+      ncbi_id <- as.character(hasap_geneID_mapping_df$GeneID[matched_indices[1]])
+      matched_ncbi_ids <- c(matched_ncbi_ids, ncbi_id)
+    }
+    # If no match is found, the gene ID is not added to the temporary vector
+  }
+
+  # Replace the original component with the vector of matched NCBI IDs
+  deg.list[[i]] <- unique(matched_ncbi_ids)
+}
+
+```
+
+
+## Convert the gene list obtained to NCBI ids.
+
+```{r}
+
+# Create an empty list to store NCBI IDs
+# ncbi_list <- list()
+
+# # Iterate over each component in your gene list
+# for(i in 1:length(deg.list)) {
+#   # For each gene ID, find the corresponding NCBI ID
+#   ncbi_ids <- sapply(deg.list[[i]], function(x) geneID_mapping_df$GeneID[which(geneID_mapping_df$qseqid == x)])
+#   
+#   # Store the NCBI IDs in the new list
+#   ncbi_list[[i]] <- ncbi_ids
+# }
+
+# for(i in seq_along(deg.list)) {
+#   for(j in seq_along(deg.list[[i]])) {
+#     gene_id <- deg.list[[i]][[j]]
+#     matched_indices <- which(geneID_mapping_df$qseqid == gene_id)
+# 
+#     # Check if any NCBI IDs were found
+#     if(length(matched_indices) > 0) {
+#       # Use only the first matched NCBI ID
+#       ncbi_id <- geneID_mapping_df$GeneID[matched_indices[1]]
+#       deg.list[[i]][[j]] <- ncbi_id
+#     }
+#     # If no match is found, the original gene ID is left unchanged
+#   }
+# }
+
+
+
+
+```
+
+
+```{r}
+# 
+# for(i in seq_along(deg.list)) {
+#   # Initialize a temporary vector to store the matched NCBI IDs
+#   matched_ncbi_ids <- c()
+# 
+#   for(j in seq_along(deg.list[[i]])) {
+#     gene_id <- deg.list[[i]][[j]]
+#     matched_indices <- which(geneID_mapping_df$qseqid == gene_id)
+# 
+#     # If any NCBI IDs were found, add the first matched NCBI ID to the temporary vector
+#     if(length(matched_indices) > 0) {
+#       ncbi_id <- geneID_mapping_df$GeneID[matched_indices[1]]
+#       matched_ncbi_ids <- c(matched_ncbi_ids, ncbi_id)
+#     }
+#     # If no match is found, the gene ID is not added to the temporary vector
+#   }
+# 
+#   # Replace the original component with the vector of matched NCBI IDs
+#   deg.list[[i]] <- matched_ncbi_ids
+# }
+
+
+##
+
+for(i in seq_along(deg.list)) {
+  # Initialize a temporary vector to store the matched NCBI IDs
+  matched_ncbi_ids <- character(0)
+
+  for(j in seq_along(deg.list[[i]])) {
+    gene_id <- deg.list[[i]][[j]]
+    matched_indices <- which(hasap_geneID_mapping_df$qseqid == gene_id)
+
+    # If any NCBI IDs were found, add the first matched NCBI ID to the temporary vector
+    if(length(matched_indices) > 0) {
+      ncbi_id <- as.character(hasap_geneID_mapping_df$GeneID[matched_indices[1]])
+      matched_ncbi_ids <- c(matched_ncbi_ids, ncbi_id)
+    }
+    # If no match is found, the gene ID is not added to the temporary vector
+  }
+
+  # Replace the original component with the vector of matched NCBI IDs
+  deg.list[[i]] <- unique(matched_ncbi_ids)
+}
+
+```
+
+
+## GO per Cluster
+
+```{r}
+
+go.ls <- deg.list %>% map(~{
+  
+  eGO <- enrichGO(
+    gene          = .x,
+    OrgDb         = org.Hs.eg.db,
+    ont           = "ALL",
+    pAdjustMethod = "BH",
+    pvalueCutoff  = 0.05,
+    readable      = TRUE
+  )
+  
+  return(eGO)
+})
+
+
+go.ls
+
+```
+
+```{r}
+
+# Assuming go.ls is your list
+for (i in seq_along(go.ls)) {
+  # Create a variable name like go.ls.0, go.ls.1, etc.
+  var_name <- paste0("go.ls.", i - 1)
+
+  # Convert the list element to a data frame and assign it to the new variable
+  assign(var_name, data.frame(go.ls[[i]]))
+}
+
+```
+
+## Exporting GO lists.
+
+```{r}
+
+# Directory where you want to save the CSV files
+dir_path <- "02_RESULTS/02_GOxCLUSTER"
+
+# Check if the directory exists; if not, create it
+if (!dir.exists(dir_path)) {
+  dir.create(dir_path, recursive = TRUE)
+}
+
+# Create a vector of variable names (the same names you used in the previous step)
+var_names <- paste0("go.ls.", seq_along(go.ls) - 1)
+
+# Loop through the variable names
+for (var_name in var_names) {
+  # Retrieve the data frame from the variable name
+  df <- get(var_name)
+
+  # Create a file path for the CSV, including the directory
+  file_path <- file.path(dir_path, paste0(var_name, ".csv"))
+
+  # Write the data frame to a CSV file in the specified directory
+  write.csv(df, file_path, row.names = TRUE)
+}
+
+```
+
+
+## GO NON-readble with Gene ID for mapping
+
+```{r}
+
+go.ls_entrez <- deg.list %>% map(~{
+  
+  eGO <- enrichGO(
+    gene          = .x,
+    OrgDb         = org.Hs.eg.db,
+    ont           = "ALL",
+    pAdjustMethod = "BH",
+    pvalueCutoff  = 0.05,
+    readable      = FALSE
+  )
+  
+  return(eGO)
+})
+
+
+go.ls_entrez
+
+```
+
+## Create Data Frame
+
+```{r}
+
+
+# Assuming go.ls is your list
+for (i in seq_along(go.ls_entrez)) {
+  # Create a variable name like go.ls.0, go.ls.1, etc.
+  var_name <- paste0("go.ls_entrez.", i - 1)
+
+  # Convert the list element to a data frame and assign it to the new variable
+  assign(var_name, data.frame(go.ls_entrez[[i]]))
+}
+
+```
+
+
+##
+
+```{r}
+
+## Mapping human entrez id to hglab id
+
+### SINGLE DF ###
+
+# Assuming df1 and mdf are your data frames and 'gene_id' is the column of interest in both
+# Split the gene IDs in df1
+split_ids <- strsplit(go.ls_entrez.0$geneID, "/")
+
+# Function to map each gene ID based on mdf
+map_ids <- function(ids) {
+  sapply(ids, function(id) {
+    # Find the mapped ID in mdf, or return the original ID if not found
+    mapped_id <- hasap_geneID_mapping_df$qseqid[hasap_geneID_mapping_df$geneID == id]
+    if (length(mapped_id) == 0) {
+      return(id)
+    } else {
+      return(mapped_id)
+    }
+  })
+}
+
+# Apply the mapping function to each set of split IDs and recombine them
+mapped_ids <- sapply(split_ids, function(ids) paste(map_ids(ids), collapse = "/"))
+
+# Add the mapped IDs as a new column in df1
+go.ls_entrez.0$mapped_gene_id <- mapped_ids
+
+
+```
+
+## Compare Clusters
+
+```{r}
+
+gene.ls <- deg.list[c(1, 4)]
+
+compGO_1.4 <- compareCluster(geneCluster   = gene.ls,
+                           fun           = "enrichGO",
+                           pvalueCutoff  = 0.05,
+                           pAdjustMethod = "BH", 
+                           OrgDb = org.Hs.eg.db, 
+                           ont = 'BP')
+
+
+```
+
+```{r}
+
+dotplot(compGO_1.4, showCategory = 10)
+
+```
+
+
+## GSEA GO
+
+```{r}
+all_comb.cluster0.exp <- all_comb.cluster0.markers %>% arrange(desc(avg_log2FC))
+
+all_comb.cluster0.exp <- rownames_to_column(all_comb.cluster0.exp, "qseqid")
+all_comb.cluster0.exp <- inner_join(all_comb.cluster0.exp, hasap_geneID_mapping_df, by = "qseqid")
+all_comb.cluster0.exp <- all_comb.cluster0.exp[!duplicated(all_comb.cluster0.exp$geneID), ]
+#extracting the l2FC of the uniprot IDs
+c0_gls <- all_comb.cluster0.exp$avg_log2FC
+# name the vector
+names(c0_gls) <- all_comb.cluster0.exp$geneID
+
+c0_gls <- sort(c0_gls, decreasing = TRUE)
+
+head(c0_gls)
+
+gse_c0 <- gseGO(geneList=c0_gls, 
+             ont ="BP", 
+             keyType = "ENTREZID", 
+             nPerm = 5000, 
+             minGSSize = 15, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "BH")
+
+gse_c0_df <- as.data.frame(gse_c0)
+
+dotplot(gse_c0, showCategory=10, font.size = 14, label_format = 30)
+
+```
+
+
+
+```{r}
+
+all_comb.cluster10.exp <- all_comb.cluster10.markers %>% arrange(desc(avg_log2FC))
+
+all_comb.cluster10.exp <- rownames_to_column(all_comb.cluster10.exp, "qseqid")
+all_comb.cluster10.exp <- inner_join(all_comb.cluster10.exp, hasap_geneID_mapping_df, by = "qseqid")
+all_comb.cluster10.exp <- all_comb.cluster10.exp[!duplicated(all_comb.cluster10.exp$geneID), ]
+#extracting the l2FC of the uniprot IDs
+c10_gls <- all_comb.cluster10.exp$avg_log2FC
+# name the vector
+names(c10_gls) <- all_comb.cluster10.exp$geneID
+
+c10_gls <- sort(c10_gls, decreasing = TRUE)
+
+head(c10_gls)
+
+gse_c10 <- gseGO(geneList=c10_gls, 
+             ont ="BP", 
+             keyType = "ENTREZID", 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "BH")
+
+gse_c10_df <- as.data.frame(gse_c10)
+
+dotplot(gse_c10, showCategory=10, font.size = 14, label_format = 30)
+
+
+```
+
+```{r}
+
+
+all_comb.cluster5.exp <- all_comb.cluster5.markers %>% arrange(desc(avg_log2FC))
+
+all_comb.cluster5.exp <- rownames_to_column(all_comb.cluster5.exp, "qseqid")
+all_comb.cluster5.exp <- inner_join(all_comb.cluster5.exp, hasap_geneID_mapping_df, by = "qseqid")
+all_comb.cluster5.exp <- all_comb.cluster5.exp[!duplicated(all_comb.cluster5.exp$geneID), ]
+#extracting the l2FC of the uniprot IDs
+c5_gls <- all_comb.cluster5.exp$avg_log2FC
+# name the vector
+names(c5_gls) <- all_comb.cluster5.exp$geneID
+
+c5_gls <- sort(c5_gls, decreasing = TRUE)
+
+head(c5_gls)
+
+gse_c5 <- gseGO(geneList=c5_gls, 
+             ont ="BP", 
+             keyType = "ENTREZID", 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "BH")
+
+gse_c5_df <- as.data.frame(gse_c5)
+
+dotplot(gse_c5, showCategory=10, font.size = 14, label_format = 30)
+
+```
+
+
+

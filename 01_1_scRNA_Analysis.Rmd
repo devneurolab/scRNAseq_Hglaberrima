@@ -1,0 +1,2501 @@
+---
+title: "01.1 scRNA-seq: Finding Markers"
+author: "Joshua G. Medina-Feliciano"
+date: "2024-03-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '/Users/joshuagmedina/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/08-SCRNA-HGLABv4/')
+```
+
+# 1.0 Setting up environment
+
+-   **1.1 Loading libraries**
+
+```{r}
+
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(DESeq2)
+library(SoupX)
+library(hdf5r)
+library(scCustomize)
+library(DropletUtils)
+library(cowplot)
+library(metap)
+library(scater)
+library(TSCAN)
+library(readr)
+library(RColorBrewer)
+library(patchwork)
+library(tidyverse)
+library(ggnewscale)
+library(reshape2)
+library(pcaMethods)
+library(velocyto.R)
+library(SeuratWrappers)
+library(SeuratDisk)
+#library(scSHC)
+
+```
+
+-   **1.1 Set working directory**
+
+```{r}
+
+setwd("/Users/joshuagmedina/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/08-SCRNA-HGLABv4/")
+
+```
+
+-   **1.2 Load gene IDs**
+
+```{r}
+
+# Read data frame with mapping IDs
+
+map_ids <- read_delim(file = "./00_REFS/01_HUMAN_UNIPROT/augustus_hints_brk3v6_mapping_hsap.tsv", delim = "\t", col_names = FALSE)
+map_ids$X1 <- sub("\\..*$", "", map_ids$X1)
+map_ids$X2 <- sub("\\..*$", "", map_ids$X2)
+#map_ids$X2 <- gsub("_", "-", map_ids$X2)
+
+head(map_ids)
+
+```
+
+-   **1.3 Load gene information**
+
+**Human Uniprot**
+```{r}
+
+human_uniprot.metadata <- read_delim(
+  file = "00_REFS/01_HUMAN_UNIPROT/UP000005640_9606.hsapUniprot.metadata.tsv", 
+  delim = "\t", 
+  col_names = TRUE)
+
+head(human_uniprot.metadata)
+
+human_uniprot.map <- read_delim(
+  file = "00_REFS/01_HUMAN_UNIPROT/augustus_hints_brk3v6_mapping_hsap.tsv", 
+  delim = "\t", 
+  col_names = FALSE)
+
+human_uniprot.map$X1 <- sub("\\..*$", "", human_uniprot.map$X1)
+human_uniprot.map$X2 <- sub("\\..*$", "", human_uniprot.map$X2)
+
+colnames(human_uniprot.map) <- c('AnnotID', 'Gene Symbol')
+
+head(human_uniprot.map)
+
+human_uniprot.map <- inner_join(human_uniprot.map, human_uniprot.metadata, by = "Gene Symbol")
+head(human_uniprot.map)
+
+```
+
+**Reviewed Uniprot Database**
+
+```{r}
+
+all_uniprot.metadata <- read_delim(
+  file = "00_REFS/03_ALL_UNIPROT/uniprot_sprot.meta.tsv", 
+  delim = "\t", 
+  col_names = TRUE)
+
+head(all_uniprot.metadata)
+
+all_uniprot.map <- read_delim(
+  file = "00_REFS/03_ALL_UNIPROT/augustus_hints_w_utr.v4.reviewed_uniprot.mapping.tsv", 
+  delim = "\t", 
+  col_names = FALSE)
+
+all_uniprot.map$X1 <- sub("\\..*$", "", all_uniprot.map$X1)
+
+colnames(all_uniprot.map) <- c('AnnotID', 'Gene Symbol')
+
+all_uniprot.map <- inner_join(all_uniprot.map, all_uniprot.metadata, by = "Gene Symbol")
+colnames(all_uniprot.map) <- c('ID', 'UniprotSpeciesGeneSymbol', 'UniprotSpeciesID', 'UniprotSpeciesDescription')
+head(all_uniprot.map)
+
+```
+
+## 2.0 Finding Markers
+
+```{r}
+## RUN TO RESET VARIABLES ##
+
+# Define the range for i
+start_value <- 0
+end_value <- 14  # Adjust as needed
+
+# Loop through the range and remove variables
+for (i in start_value:end_value) {
+    rm(list = ls(pattern = paste0("all_tissues_cluster", i)), envir = .GlobalEnv)
+}
+
+
+```
+
+```{r}
+DefaultAssay(all_tissues_seurat) <- "RNA"
+number_of_clusters <- 13
+
+for (i in 0:(number_of_clusters - 1)) {
+  cluster_marker = FindMarkers(all_tissues_seurat, ident.1 = i)
+  cluster_marker$pct.diff <- cluster_marker$pct.1 - cluster_marker$pct.2
+  
+  # Dynamically naming the data frames
+  df_name <- paste("all.tissues.cluster", i, ".markers", sep = "")
+  assign(df_name, cluster_marker)
+}
+
+
+```
+
+```{r}
+# Define the range of cluster numbers
+cluster_start <- 0
+cluster_end <- 12
+
+for (cluster_number in cluster_start:cluster_end) {
+  df_name <- paste0("all.tissues.cluster", cluster_number, ".markers")
+  final_df_name <- paste0("all_tissues_cluster", cluster_number)
+  
+  # Convert row names to a column 'ID'
+  current_df <- data.frame(ID = row.names(get(df_name)), get(df_name), row.names = NULL)
+  
+  # Create an index to match IDs from the current dataframe to the mapping dataframe
+  idx <- match(current_df$ID, human_uniprot.map$AnnotID)
+  
+  # Use the index to add the matching rows from map_ids to the current dataframe
+  # Including handling NA for unmatched rows
+  current_df$GeneSymbol <- ifelse(!is.na(idx), human_uniprot.map$`Gene Symbol`[idx], NA)
+  current_df$UniprotID <- ifelse(!is.na(idx), human_uniprot.map$`Uniprot ID`[idx], NA)
+  current_df$UniprotDescription <- ifelse(!is.na(idx), human_uniprot.map$`Uniprot Description`[idx], NA)
+  
+  # Assign the modified dataframe to the final dataframe name
+  assign(final_df_name, current_df)
+  
+  # Export the final dataframe to CSV
+#  export_path <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/01_MARKERS/", final_df_name, ".csv")
+#  write.csv(get(final_df_name), file = export_path, row.names = FALSE)
+}
+
+```
+
+Adding more gene info based on all uniprot reviewed data base
+
+```{r}
+# First, ensure additional_metadata has unique IDs
+# This example keeps the first occurrence of each ID
+all_uniprot.map <- all_uniprot.map[!duplicated(all_uniprot.map$ID), ]
+
+# Define the range of cluster numbers
+cluster_start <- 0
+cluster_end <- 12
+
+# Loop to add additional metadata to each final dataframe
+for (cluster_number in cluster_start:cluster_end) {
+  final_df_name <- paste0("all_tissues_cluster", cluster_number)
+  
+  # Check if the final dataframe exists in the environment
+  if(exists(final_df_name)) {
+    # Retrieve the final dataframe from the previous loop
+    final_df <- get(final_df_name)
+    
+    # Merge the additional metadata into the final dataframe based on the 'ID' column
+    # Using the unique version of additional_metadata
+    updated_final_df <- merge(final_df, all_uniprot.map, by = "ID", all.x = TRUE)
+    
+    # Reassign the updated dataframe back to the same variable name
+    assign(final_df_name, updated_final_df)
+    
+    # Export the updated final dataframe to CSV (overwriting the previous file)
+    # export_path <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/", final_df_name, ".csv")
+    # write.csv(updated_final_df, file = export_path, row.names = FALSE)
+  }
+}
+
+print("All data frames have been updated with additional metadata and exported.")
+
+```
+
+### 2.1.0 Exporting markers info to excel
+
+```{r}
+
+#library(openxlsx)
+
+# Define the range of cluster numbers
+cluster_start <- 0
+cluster_end <- 12
+
+# Specify the path for the output Excel file
+output_excel_file <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/01_MARKERS/Cluster_Markers_and_Metadata_Annotv4_Integration_20.xlsx")
+
+# Create a new workbook
+wb <- createWorkbook()
+
+# Loop to add each data frame to a separate sheet in the workbook
+for (cluster_number in cluster_start:cluster_end) {
+  final_df_name <- paste0("all_tissues_cluster", cluster_number)
+  
+  # Check if the data frame exists in the environment
+  if(exists(final_df_name)) {
+    # Retrieve the data frame
+    final_df <- get(final_df_name)
+    
+    # Add a sheet to the workbook with the data frame, named by the cluster number
+    addWorksheet(wb, sheetName = paste("Cluster", cluster_number))
+    writeData(wb, sheet = paste("Cluster", cluster_number), x = final_df)
+  }
+}
+
+# Save the workbook to the specified Excel file
+saveWorkbook(wb, file = output_excel_file, overwrite = TRUE)
+
+print(paste("Excel file with cluster data has been saved to", output_excel_file))
+
+
+```
+
+*Cluster gene comparisons*
+
+```{r}
+
+comb.mainCluster.specif.markers <- FindMarkers(all_tissues_seurat,
+            ident.1 = c(0,1,3,4,5,8,9),
+            ident.2 = c(2,7),
+            only.pos = TRUE)
+
+comb.mainCluster.specif.markers$pcf.diff <- comb.mainCluster.specif.markers$pct.1 - comb.mainCluster.specif.markers$pct.2
+
+
+comb.smallCluster.specif.markers <- FindMarkers(all_tissues_seurat,
+            ident.1 = c(2,7),
+            ident.2 = c(0,1,3,4,5,8,9),
+            only.pos = TRUE)
+
+comb.smallCluster.specif.markers$pcf.diff <- comb.smallCluster.specif.markers$pct.1 - comb.smallCluster.specif.markers$pct.2
+
+head(comb.mainCluster.specif.markers)
+
+cluster1Vcluster3.markers <- FindMarkers(all_tissues_seurat,
+            ident.1 = 1,
+            ident.2 = 3,
+            only.pos = TRUE)
+cluster1Vcluster3.markers$pcf.diff <- cluster1Vcluster3.markers$pct.1 - cluster1Vcluster3.markers$pct.2
+
+cluster3Vcluster1.markers <- FindMarkers(all_tissues_seurat,
+            ident.1 = 3,
+            ident.2 = 1,
+            only.pos = TRUE)
+cluster3Vcluster1.markers$pcf.diff <- cluster3Vcluster1.markers$pct.1 - cluster3Vcluster1.markers$pct.2
+
+
+
+```
+
+
+*Exporting main clusters comparisons*
+
+```{r}
+
+map_markers2genes <- function(dataframe_name, map_ids) {
+  # Convert row names to a column 'ID'
+  current_df <- data.frame(ID = row.names(get(dataframe_name)), get(dataframe_name), row.names = NULL)
+  
+  # Map IDs and create the final dataframe
+  final_df_name <- paste0(dataframe_name, "_mapped")
+  
+  idx <- match(current_df$ID, map_ids$AnnotID)
+  
+    # Use the index to add the matching rows from map_ids to the current dataframe
+  # Including handling NA for unmatched rows
+  current_df$GeneSymbol <- ifelse(!is.na(idx), map_ids$`Gene Symbol`[idx], NA)
+  current_df$UniprotID <- ifelse(!is.na(idx), map_ids$`Uniprot ID`[idx], NA)
+  current_df$UniprotDescription <- ifelse(!is.na(idx), map_ids$`Uniprot Description`[idx], NA)
+  
+  # Assign the modified dataframe to the final dataframe name
+  assign(final_df_name, current_df)
+  
+  export_path <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/01_MARKERS/", final_df_name, ".csv")
+  write.csv(get(final_df_name), file = export_path, row.names = FALSE)
+}
+
+
+```
+
+
+```{r}
+
+map_markers2genes <- function(dataframe_name, map_ids) {
+  # Convert row names to a column 'ID'
+  current_df <- data.frame(ID = row.names(get(dataframe_name)), get(dataframe_name), row.names = NULL)
+  
+  # Map IDs and create the final dataframe
+  final_df_name <- paste0(dataframe_name, "_mapped")
+  
+  idx <- match(current_df$ID, map_ids$AnnotID)
+  
+  # Use the index to add the matching rows from map_ids to the current dataframe
+  # Including handling NA for unmatched rows
+  current_df$GeneSymbol <- ifelse(!is.na(idx), map_ids$`Gene Symbol`[idx], NA)
+  current_df$UniprotID <- ifelse(!is.na(idx), map_ids$`Uniprot ID`[idx], NA)
+  current_df$UniprotDescription <- ifelse(!is.na(idx), map_ids$`Uniprot Description`[idx], NA)
+  
+  # Export the modified dataframe to a CSV file
+  export_path <- paste0(getwd(), "/02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/01_MARKERS/", final_df_name, ".csv")
+  write.csv(current_df, file = export_path, row.names = FALSE)
+  
+  # Return the modified dataframe
+  return(current_df)
+}
+
+```
+
+
+```{r}
+
+# Using the function
+
+dataframe_name <- "cluster3Vcluster1.markers"
+
+cluster3Vcluster1.markers_mapped <- map_markers2genes(dataframe_name, human_uniprot.map)
+
+```
+
+
+### 2.1.1 Data Visualization
+
+*Adding metadata*
+
+```{r}
+
+# Create a new column initialized with NA
+all_tissues_seurat$cluster_groups <- NA
+
+# Assign clusters to their respective groups
+all_tissues_seurat$cluster_groups[all_tissues_seurat$seurat_clusters %in% c(0,1,3,4,5,9,8)] <- "Epithelial"
+all_tissues_seurat$cluster_groups[all_tissues_seurat$seurat_clusters %in% c(2,7)] <- "Mesenchymal"
+all_tissues_seurat$cluster_groups[all_tissues_seurat$seurat_clusters %in% c(6,10,11,12)] <- "Immune"
+
+```
+
+```{r}
+
+dimplot_fig2 <- DimPlot(all_tissues_seurat, group.by='cluster_groups',reduction = "umap",
+                          raster = FALSE, cols=alpha(c("blue", "darkgreen", "red"),0.5),pt.size=1) +
+  guides(x = axis, y = axis, colour = guide_legend(override.aes = list(size=8))) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 16),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = c(1,0), legend.justification = "right", legend.direction = "horizontal",
+        plot.title = element_blank(),
+        legend.key.size = unit(1, 'cm'),
+        legend.text = element_text(size=18))
+
+dimplot_fig2
+
+ggsave(plot = dimplot_fig2, filename = "Figure2C.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 8, height = 6, dpi = 500, unit = "in", device = "png")
+
+```
+
+```{r}
+
+dimplot_fig5 <- DimPlot(all_tissues_seurat, group.by='cluster_groups',reduction = "umap",
+                          raster = FALSE, cols=alpha(c("blue", "gray", "gray"),0.5),pt.size=1) +
+  guides(x = axis, y = axis, colour = guide_legend(override.aes = list(size=8))) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 16),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "none", legend.justification = "right", legend.direction = "horizontal",
+        plot.title = element_blank(),
+        legend.key.size = unit(1, 'cm'),
+        legend.text = element_text(size=18))
+
+dimplot_fig5
+
+ggsave(plot = dimplot_fig5, filename = "Figure5A.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 8, height = 6, dpi = 500, unit = "in", device = "png")
+
+```
+
+```{r}
+
+dimplot_fig4 <- DimPlot(all_tissues_seurat, group.by='cluster_groups',reduction = "umap",
+                          raster = FALSE, cols=alpha(c("gray", "gray", "red"),0.5),pt.size=1) +
+  guides(x = axis, y = axis, colour = guide_legend(override.aes = list(size=8))) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 16),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "none", legend.justification = "right", legend.direction = "horizontal",
+        plot.title = element_blank(),
+        legend.key.size = unit(1, 'cm'),
+        legend.text = element_text(size=18))
+
+dimplot_fig4
+
+ggsave(plot = dimplot_fig4, filename = "Figure4A.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 8, height = 6, dpi = 500, unit = "in", device = "png")
+
+```
+
+```{r}
+
+dimplot_fig3 <- DimPlot(all_tissues_seurat, group.by='cluster_groups',reduction = "umap",
+                          raster = FALSE, cols=alpha(c("gray", "darkgreen", "gray"),0.5),pt.size=1) +
+  guides(x = axis, y = axis, colour = guide_legend(override.aes = list(size=8))) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 16),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "none", legend.justification = "right", legend.direction = "horizontal",
+        plot.title = element_blank(),
+        legend.key.size = unit(1, 'cm'),
+        legend.text = element_text(size=18))
+
+dimplot_fig3
+
+ggsave(plot = dimplot_fig3, filename = "Figure3A.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 8, height = 6, dpi = 500, unit = "in", device = "png")
+
+
+```
+
+ 
+# 3.0 Dot Plot of Highly Expressed Relevant Genes_
+*Preparing data to for plot*
+
+```{r}
+# Genes were selected based on their expression and how related they are to clasifying each population.
+
+genes_to_plot <- c("g12472",
+"g16729",
+"g5602",
+"g23025",
+"g21278",
+"g2991",
+"g9000",
+"g25362",
+"g31062",
+"g25175",
+"g692",
+"g24397",
+"g8655",
+"g16520",
+"g3551",
+"g28738",
+"g14771",
+"g16362",
+"g5159",
+"g30734",
+"g12820",
+"g4167",
+"g23550",
+"g23554",
+"g21450",
+"g1059",
+"g21935",
+"g4263",
+"g22798",
+"g17372",
+"g12467",
+"g28416",
+"g23420",
+"g19905",
+"g16331",
+"g6564",
+"g17661",
+"g7516",
+"g6457",
+"g1414",
+"g9744",
+"g10178",
+"g9745",
+"g20901",
+"g24091",
+"g11511",
+"g12320",
+"g18738",
+"g29212",
+"g9003",
+"g24629",
+"g21526",
+"g29210",
+"g28948",
+"g17648",
+"g23843",
+"g1869",
+"g1868",
+"g29679",
+"g6952",
+"g9198",
+"g26329",
+"g13616",
+"g10309",
+"g16741",
+"g17742",
+"g11013",
+"g24142",
+"g19826",
+"g10707",
+"g17332")
+
+
+dotplot_data <- all_tissues_seurat %>%
+  DotPlot(
+    features = genes_to_plot,  # Replace with your gene of interest
+    assay = "RNA",
+    group.by = "cluster_groups",
+    split.by = "seurat_clusters",
+    cols = "Dark2"
+  )
+
+dotplot_data_v2 <- dotplot_data$data
+dotplot_data_v2 <- dotplot_data_v2 %>%
+  separate(id, into = c("group", "ident"), sep = "_")
+
+dotplot_data_v2$grouped_id <- factor(paste0(dotplot_data_v2$group, "_", dotplot_data_v2$ident), levels = unique(paste0(dotplot_data_v2$group, "_", dotplot_data_v2$ident)))
+
+head(human_uniprot.map)
+
+# Map IDs and create the final dataframe
+dotplot_data_v2 <- cbind(dotplot_data_v2, GeneName = human_uniprot.map$`Gene Symbol`[match(dotplot_data_v2$features.plot, human_uniprot.map$AnnotID)])
+
+# Loop to fill NA values that were created by the features.plot IDs that did not have a match in the human_uniprot.map data frame
+for(i in 1:nrow(dotplot_data_v2)) {
+  if(is.na(dotplot_data_v2$GeneName[i])) {
+    dotplot_data_v2$GeneName[i] <- as.character(dotplot_data_v2$features.plot[i])
+  }
+}
+
+#dotplot_data_v3$UniprotID <- factor(dotplot_data_v3$UniprotID, levels = unique(dotplot_data_v3$UniprotID))
+
+
+```
+
+```{r}
+
+
+# Find the maximum x-axis position (grouped_id) for each group
+line_positions <- dotplot_data_v2 %>%
+  group_by(group) %>%
+  summarize(line_pos = max(as.numeric(ident))) %>%
+  pull(line_pos)
+
+# Remove the last position since we don't want a line after the last group
+line_positions <- line_positions[-length(line_positions)]
+# Adjust the positions by adding 0.5
+line_positions <- line_positions + 0.5
+
+line_positions <- c(7.5, 9.5)
+
+# Initial plot with the first group's gradient
+custom_dot_plot <- ggplot(dotplot_data_v2, aes(x = grouped_id, y = factor(GeneName, levels = unique(GeneName)))) +
+  geom_point(data = subset(dotplot_data_v2, group == "Group 1"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Coelomic Epithelia", low = "light gray", high = "blue") +
+  theme_classic() +
+  theme(axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 12, angle = 0, hjust = 0.5)) +
+  scale_size_continuous(range = c(0, 6),  guide = guide_legend(override.aes = list(fill = "black"))) +
+  scale_x_discrete(labels = function(x) gsub(".*_", "", x)) + 
+  labs(x = "Population Identity Number", y = "Gene ID") +
+  new_scale_color() +  # New scale for the next group
+  
+  guides(size = guide_legend(title = "% Rep", order = 2), color = guide_legend(order = 1)) +
+  
+  # Add the second group's gradient
+  geom_point(data = subset(dotplot_data_v2, group == "Group 2"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Mesenchymal", low = "light gray", high = "red") +
+  new_scale_color() +  # New scale for the next group
+  
+  # Add the third group's gradient
+  geom_point(data = subset(dotplot_data_v2, group == "Group 3"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Coelomocytes", low = "light gray", high = "darkgreen")
+
+custom_dot_plot <- custom_dot_plot +
+  geom_vline(xintercept = line_positions, linetype = "solid", color = "black")
+
+custom_dot_plot
+
+ggsave(plot = custom_dot_plot, filename = "Figure2A.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 8, height = 12, dpi = 500, unit = "in", device = "png")
+
+```
+
+
+
+
+## 3.1.0 Dot Plot Transcription Factors
+
+_Dot plot of transcription factors_
+
+<!-- ```{bash, engine.opts='-l'} -->
+
+<!-- <!-- awk '!seen[$0]++' 02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/dot_plot_tf.txt > 02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/dot_plot_tf.unq.notsort.txt --> -->
+
+<!-- <!-- # make sure that you have changed the file being processed by the script. --> -->
+<!-- <!-- python3 02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/modify_list.py --> -->
+
+<!-- <!-- cat 02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/dot_plot_tf.unq.notsort.txt --> -->
+
+
+<!-- ``` -->
+
+
+```{r}
+
+tf_to_plot <- c("g9143",
+"g12472",
+"g9779",
+"g29831",
+"g4829",
+"g2991",
+"g9000",
+"g25362",
+"g31062",
+"g498",
+"g692",
+"g13582",
+"g6526",
+"g28366",
+"g1184",
+"g16228",
+"g25788",
+"g19583",
+"g26116",
+"g17483",
+"g23544",
+"g11430",
+"g30710",
+"g22968",
+"g3565",
+"g12326",
+"g9454",
+"g16754",
+"g6160",
+"g2628",
+"g17372",
+"g841",
+"g14235",
+"g20911",
+"g1110",
+"g24667",
+"g5671",
+"g4494",
+"g24678",
+"g11715",
+"g4134",
+"g21713",
+"g12447",
+"g26118",
+"g11511",
+"g19421",
+"g23199",
+"g30510",
+"g1230",
+"g29210",
+"g1453",
+"g14466",
+"g15877",
+"g4266",
+"g16741",
+"g18513",
+"g1870",
+"g19436",
+"g14814",
+"g14819",
+"g15805",
+"g23007",
+"g15588",
+"g10528")
+
+
+tf_dotplot_data <- all_tissues_seurat %>%
+  DotPlot(
+    features = tf_to_plot,  # Replace with your gene of interest
+    assay = "RNA",
+    group.by = "cluster_groups",
+    split.by = "seurat_clusters",
+    cols = "Dark2"
+  )
+
+tf_dotplot_data.v2 <- tf_dotplot_data$data
+tf_dotplot_data.v2 <- tf_dotplot_data.v2 %>%
+  separate(id, into = c("group", "ident"), sep = "_")
+
+tf_dotplot_data.v2$grouped_id <- factor(paste0(tf_dotplot_data.v2$group, "_", tf_dotplot_data.v2$ident), levels = unique(paste0(tf_dotplot_data.v2$group, "_", tf_dotplot_data.v2$ident)))
+
+head(human_uniprot.map)
+
+# Map IDs and create the final dataframe
+tf_dotplot_data.v2 <- cbind(tf_dotplot_data.v2, GeneName = human_uniprot.map$`Gene Symbol`[match(tf_dotplot_data.v2$features.plot, human_uniprot.map$AnnotID)])
+
+# Loop to fill NA values that were created by the features.plot IDs that did not have a match in the human_uniprot.map data frame
+for(i in 1:nrow(tf_dotplot_data.v2)) {
+  if(is.na(tf_dotplot_data.v2$GeneName[i])) {
+    tf_dotplot_data.v2$GeneName[i] <- as.character(tf_dotplot_data.v2$features.plot[i])
+  }
+}
+
+```
+
+
+```{r}
+
+# Find the maximum x-axis position (grouped_id) for each group
+line_positions <- tf_dotplot_data.v2 %>%
+  group_by(group) %>%
+  summarize(line_pos = max(as.numeric(ident))) %>%
+  pull(line_pos)
+
+# Remove the last position since we don't want a line after the last group
+line_positions <- line_positions[-length(line_positions)]
+# Adjust the positions by adding 0.5
+line_positions <- line_positions + 0.5
+
+line_positions <- c(7.5, 9.5)
+
+# Initial plot with the first group's gradient
+tf_custom_dot_plot <- ggplot(tf_dotplot_data.v2, aes(x = grouped_id, y = factor(GeneName, levels = unique(GeneName)))) +
+  geom_point(data = subset(tf_dotplot_data.v2, group == "Epithelial"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Coelomic Epithelia", low = "light gray", high = "blue") +
+  theme_classic() +
+  theme(axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 12, angle = 0, hjust = 0.5)) +
+  scale_size_continuous(range = c(0, 6),  guide = guide_legend(override.aes = list(fill = "black"))) +
+  scale_x_discrete(labels = function(x) gsub(".*_", "", x)) + 
+  labs(x = "Population Identity Number", y = "Gene ID") +
+  new_scale_color() +  # New scale for the next group
+
+  guides(size = guide_legend(title = "% Rep", order = 2), color = guide_legend(order = 1)) +  
+
+  # Add the second group's gradient
+  geom_point(data = subset(tf_dotplot_data.v2, group == "Mesenchymal"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Mesenchymal", low = "light gray", high = "red") +
+  new_scale_color() +  # New scale for the next group
+  
+  # Add the third group's gradient
+  geom_point(data = subset(tf_dotplot_data.v2, group == "Immune"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Coelomocyte", low = "light gray", high = "darkgreen")
+
+tf_custom_dot_plot <- tf_custom_dot_plot +
+   geom_vline(xintercept = line_positions, linetype = "solid", color = "black")
+
+tf_custom_dot_plot
+
+ggsave(plot = tf_custom_dot_plot, filename = "Figure2B.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 8, height = 12, dpi = 500, unit = "in", device = "png")
+
+```
+## Figure 3
+
+```{r}
+
+figure3a <- custom_dot_plot + theme(legend.position = 'none')
+figure3c <- DimPlot(all_tissues_seurat, group.by='cluster_groups',reduction = "umap",
+                          raster = FALSE, cols=alpha(c("blue", "darkgreen", "red"),0.5),pt.size=0.5) +
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 16),
+        axis.title = element_blank(),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = 'none',
+        plot.title = element_blank())
+
+figure3c
+
+# Stacking plotB and plotC with height adjustments
+column_stack <- tf_custom_dot_plot / figure3c 
+
+# Now combine with plotA, specifying the relative height of plotC
+figure3 <- figure3a | column_stack + 
+                 plot_layout(heights = c(3, 1))  # Adjust as needed to get the desired effect
+
+figure3 <- figure3 + plot_annotation(tag_levels = 'A')
+
+# Display the combined plot
+print(figure3)
+
+ggsave(plot = figure3, filename = "Figure3.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 14, height = 16, dpi = 500, unit = "in", device = "png")
+```
+
+
+# 4.0 Dot Plot of Mesenchyme Genes
+
+```{r}
+
+# Genes were selected based on their expression and how related they are to clasifying each population.
+
+genes_mesenchyme <- c('g5601',
+'g6564',
+'g23506',
+'g9007',
+'g14114',
+'g7516',
+'g6457',
+'g5600',
+'g9744',
+'g6587',
+'g10178',
+'g9745',
+'g11114',
+'g6563',
+'g14556',
+'g20901',
+'g23181',
+'g6451')
+
+
+dotplot_data_mesenchyme <- all_tissues_seurat %>%
+  DotPlot(
+    features = genes_mesenchyme,  # Replace with your gene of interest
+    assay = "RNA",
+    group.by = "cluster_groups",
+    split.by = "seurat_clusters",
+    cols = "Dark2"
+  )
+
+dotplot_data_mesenchyme_v2 <- dotplot_data_mesenchyme$data
+dotplot_data_mesenchyme_v2 <- dotplot_data_mesenchyme_v2 %>%
+  separate(id, into = c("group", "ident"), sep = "_")
+
+dotplot_data_mesenchyme_v2$grouped_id <- factor(paste0(dotplot_data_mesenchyme_v2$group, "_", dotplot_data_mesenchyme_v2$ident), levels = unique(paste0(dotplot_data_mesenchyme_v2$group, "_", dotplot_data_mesenchyme_v2$ident)))
+
+# head(human_uniprot.map)
+
+# Map IDs and create the final dataframe
+dotplot_data_mesenchyme_v2 <- cbind(dotplot_data_mesenchyme_v2, GeneName = human_uniprot.map$`Gene Symbol`[match(dotplot_data_mesenchyme_v2$features.plot, human_uniprot.map$AnnotID)])
+
+# Loop to fill NA values that were created by the features.plot IDs that did not have a match in the human_uniprot.map data frame
+for(i in 1:nrow(dotplot_data_mesenchyme_v2)) {
+  if(is.na(dotplot_data_mesenchyme_v2$GeneName[i])) {
+    dotplot_data_mesenchyme_v2$GeneName[i] <- as.character(dotplot_data_mesenchyme_v2$features.plot[i])
+  }
+}
+
+#dotplot_data_v3$UniprotID <- factor(dotplot_data_v3$UniprotID, levels = unique(dotplot_data_v3$UniprotID))
+head(dotplot_data_mesenchyme_v2)
+
+
+
+```
+
+```{r}
+
+# Find the maximum x-axis position (grouped_id) for each group
+line_positions <- dotplot_data_mesenchyme_v2 %>%
+  group_by(group) %>%
+  summarize(line_pos = max(as.numeric(ident))) %>%
+  pull(line_pos)
+
+# Remove the last position since we don't want a line after the last group
+line_positions <- line_positions[-length(line_positions)]
+# Adjust the positions by adding 0.5
+line_positions <- line_positions + 0.5
+
+line_positions <- c(7.5, 9.5)
+
+# Initial plot with the first group's gradient
+mesenchyme_custom_dot_plot <- ggplot(dotplot_data_mesenchyme_v2, aes(x = grouped_id, y = factor(GeneName, levels = unique(GeneName)))) +
+  geom_point(data = subset(dotplot_data_mesenchyme_v2, group == "Epithelial"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Coelomic Epithelia", low = "light gray", high = "blue") +
+  theme_classic() +
+  theme(axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 12, angle = 0, hjust = 0.5)) +
+  scale_size_continuous(range = c(0, 6),  guide = guide_legend(override.aes = list(fill = "black"))) +
+  scale_x_discrete(labels = function(x) gsub(".*_", "", x)) + 
+  labs(x = "Population Identity Number", y = "Gene ID") +
+  new_scale_color() +  # New scale for the next group
+  
+  guides(size = guide_legend(title = "% Rep", order = 2), color = guide_legend(order = 1)) +
+  
+  # Add the second group's gradient
+  geom_point(data = subset(dotplot_data_mesenchyme_v2, group == "Mesenchymal"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Mesenchymal", low = "light gray", high = "red") +
+  new_scale_color() +  # New scale for the next group
+  
+  # Add the third group's gradient
+  geom_point(data = subset(dotplot_data_mesenchyme_v2, group == "Immune"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Coelomocytes", low = "light gray", high = "darkgreen")
+
+mesenchyme_custom_dot_plot <- mesenchyme_custom_dot_plot +
+   geom_vline(xintercept = line_positions, linetype = "solid", color = "black")
+
+mesenchyme_custom_dot_plot
+
+ggsave(plot = mesenchyme_custom_dot_plot, filename = "Figure5B.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 6, height = 8, dpi = 500, unit = "in", device = "png")
+
+```
+
+## 4.1.0 Dot Plot GO Mesenchyme
+
+```{r}
+## this is dependent on Rmd 02 of the pipeline.
+# Create a list to hold all data frames
+df_list <- list(gse_c2_df, gse_c7_df)
+
+# Add a group identifier to each data frame and combine them
+combined_df <- bind_rows(lapply(1:length(df_list), function(i) {
+  df_list[[i]] %>%
+    mutate(Group = paste("", i - 1)) %>% dplyr::filter(ONTOLOGY == "BP") %>%
+    dplyr::select(Description, Group, enrichmentScore, p.adjust) %>%
+    top_n(10, wt = enrichmentScore)
+}))
+
+combined_df <- combined_df %>%
+  # Extract numeric part from the Group and convert to numeric
+  mutate(ClusterNumber = as.numeric(gsub("Cluster ", "", Group))) %>%
+  # Convert Group to a factor with levels ordered numerically based on ClusterNumber
+  mutate(Group = factor(Group, levels = unique(Group[order(ClusterNumber)]))) %>%
+  # Arrange by ClusterNumber to get correct X-axis order
+  arrange(ClusterNumber) %>%
+  # For Y-axis: arrange by desc(Group) to get Descriptions in decreasing order by their cluster appearance
+  arrange(desc(ClusterNumber)) %>%
+  # Ensure Descriptions are treated in the order they appear, which now reflects desired Y-axis order
+  mutate(Description = factor(Description, levels = unique(Description)))
+
+dotplot_go_mesenchyme <- ggplot(combined_df, aes(x = Group, y = Description, size = enrichmentScore, color = p.adjust)) +
+  geom_point(alpha = 0.7) +  # Adjust transparency with alpha
+  scale_size(range = c(1, 6)) +  # Adjust size range of dots
+  scale_color_gradient(low = "blue", high = "red") +  # Adjust color gradient
+  theme_bw() +
+  labs(x = "Cluster",
+       y = "GO Term",
+       size = "Enrichment Score",
+       color = "Adjusted P-Value") +
+  theme(axis.text.x = element_text(color = "black", size = 14),
+        axis.text.y = element_text(color = "black", size = 14),
+        legend.position = "right") +
+  scale_x_discrete(labels = c("2", "7"))
+
+dotplot_go_mesenchyme
+
+ggsave(plot = dotplot_go_mesenchyme, filename = "Figure4C.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 12, height = 6, dpi = 500, unit = "in", device = "png")
+
+
+```
+
+## Figure 5
+
+```{r}
+figure4a <- mesenchyme_custom_dot_plot + theme(axis.text.y = element_text(size = 18), axis.text.x = element_text(size = 16))
+figure4b <- dotplot_go_mesenchyme + theme(axis.text.y = element_text(size=12), axis.text.x = element_text(size = 16))
+
+figure4c <- FeaturePlot(all_tissues_seurat, features = "g12505", min.cutoff = 1, 
+            max.cutoff = 5, pt.size = 1.5, order = TRUE) &
+  guides(x = axis, y = axis) & labs(title = "Proteoglycan-4") &
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 18),
+        axis.title = element_blank(),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 18, hjust = -0.02),
+        legend.text=element_text(size=12),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey75")))
+
+figure4c <- figure4c + coord_fixed(ratio = 0.5)
+figure4d <- dimplot_fig4 + theme(axis.title = element_blank()) + coord_fixed(ratio = 0.5)
+
+
+fig4_dimplots <- figure4c + figure4d
+
+
+d <- "
+1133
+11##
+"
+
+# Now combine with plotA, specifying the relative height of plotC
+figure4 <- figure4a + figure4b + 
+                 plot_layout(design = d)
+
+# # Now combine with plotA, specifying the relative height of plotC
+# figure4 <- figure4a | ((plot_spacer() + figure4b) / (plot_spacer()|figure4c  |figure4d)) + 
+#                  plot_layout(heights = c(3, 2))  # Adjust as needed to get the desired effect
+
+figure4 <- figure4a / figure4b +
+  plot_annotation(tag_levels = 'A')
+
+figure4 <- figure4 + plot_annotation(tag_levels = 'A')
+
+# Display the combined plot
+print(figure4)
+
+ggsave(plot = figure4, filename = "Fig5.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 15, height = 20, dpi = 500, unit = "in", device = "png")
+
+```
+
+## Figure 5 -- Final
+
+```{r}
+
+figure5a <- mesenchyme_custom_dot_plot + 
+  theme(axis.text.y = element_text(size = 12),
+        axis.text.x = element_text(size = 16), 
+        axis.title = element_text(size = 16),
+        legend.key.size = unit(0.32, "cm"))
+ 
+figure5b <- dotplot_go_mesenchyme + 
+  theme(axis.text.y = element_text(size=16),
+        axis.text.x = element_text(size = 16))
+
+figure5c <- dimplot_fig4 + theme(axis.title = element_blank())
+
+fig5_stack <- figure5a / figure5c 
+
+figure5 <- fig5_stack | figure5b
+figure5 <- figure5 + plot_annotation(tag_levels = 'A')
+figure5
+
+ggsave(plot = figure5, filename = "Fig5ABC.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 20, height = 10, dpi = 500, unit = "in", device = "png")
+
+```
+
+
+
+# 5.0 Dotplot Blastema  Population
+
+```{r}
+# Genes were selected based on their expression and how related they are to clasifying each population.
+
+genes_epithelium <- c("g12472",
+"g16729",
+"g5602",
+"g23025",
+"g21278",
+"g2991",
+"g9000",
+"g25362",
+"g31062",
+"g25175",
+"g692",
+"g24397",
+"g8655",
+"g16520",
+"g3551",
+"g28738",
+"g14771",
+"g16362",
+"g5159",
+"g30734",
+"g12820",
+"g4167",
+"g23550",
+"g23554",
+"g21450",
+"g1059",
+"g21935",
+"g4263",
+"g22798",
+"g17372",
+"g12467",
+"g28416",
+"g23420",
+"g19905",
+"g16331")
+
+
+dotplot_data_epithelium <- all_tissues_seurat %>%
+  DotPlot(
+    features = genes_epithelium,  # Replace with your gene of interest
+    assay = "RNA",
+    group.by = "cluster_groups",
+    split.by = "seurat_clusters",
+    cols = "Dark2"
+  )
+
+dotplot_data_epithelium_v2 <- dotplot_data_epithelium$data
+dotplot_data_epithelium_v2 <- dotplot_data_epithelium_v2 %>%
+  separate(id, into = c("group", "ident"), sep = "_")
+
+dotplot_data_epithelium_v2$grouped_id <- factor(paste0(dotplot_data_epithelium_v2$group, "_", dotplot_data_epithelium_v2$ident), levels = unique(paste0(dotplot_data_epithelium_v2$group, "_", dotplot_data_epithelium_v2$ident)))
+
+# head(human_uniprot.map)
+
+# Map IDs and create the final dataframe
+dotplot_data_epithelium_v2 <- cbind(dotplot_data_epithelium_v2, GeneName = human_uniprot.map$`Gene Symbol`[match(dotplot_data_epithelium_v2$features.plot, human_uniprot.map$AnnotID)])
+
+# Loop to fill NA values that were created by the features.plot IDs that did not have a match in the human_uniprot.map data frame
+for(i in 1:nrow(dotplot_data_epithelium_v2)) {
+  if(is.na(dotplot_data_epithelium_v2$GeneName[i])) {
+    dotplot_data_epithelium_v2$GeneName[i] <- as.character(dotplot_data_epithelium_v2$features.plot[i])
+  }
+}
+
+#dotplot_data_v3$UniprotID <- factor(dotplot_data_v3$UniprotID, levels = unique(dotplot_data_v3$UniprotID))
+head(dotplot_data_epithelium_v2)
+
+
+```
+
+```{r}
+
+# Find the maximum x-axis position (grouped_id) for each group
+line_positions <- dotplot_data_epithelium_v2 %>%
+  group_by(group) %>%
+  summarize(line_pos = max(as.numeric(ident))) %>%
+  pull(line_pos)
+
+# Remove the last position since we don't want a line after the last group
+line_positions <- line_positions[-length(line_positions)]
+# Adjust the positions by adding 0.5
+line_positions <- line_positions + 0.5
+
+line_positions <- c(7.5, 9.5)
+
+# Initial plot with the first group's gradient
+epithelium_custom_dot_plot <- ggplot(dotplot_data_epithelium_v2, aes(x = grouped_id, y = factor(GeneName, levels = unique(GeneName)))) +
+  geom_point(data = subset(dotplot_data_epithelium_v2, group == "Epithelial"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Coelomic Epithelia", low = "light gray", high = "blue") +
+  theme_classic() +
+  theme(axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 12, angle = 0, hjust = 0.5)) +
+  scale_size_continuous(range = c(0, 6),  guide = guide_legend(override.aes = list(fill = "black"))) +
+  scale_x_discrete(labels = function(x) gsub(".*_", "", x)) + 
+  labs(x = "Clusters", y = "Gene ID") +
+  new_scale_color() +  # New scale for the next group
+  
+  guides(size = guide_legend(title = "% Rep", order = 2), color = guide_legend(order = 1)) +
+  
+  # Add the second group's gradient
+  geom_point(data = subset(dotplot_data_epithelium_v2, group == "Mesenchymal"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Mesenchymal", low = "light gray", high = "red") +
+  new_scale_color() +  # New scale for the next group
+  
+  # Add the third group's gradient
+  geom_point(data = subset(dotplot_data_epithelium_v2, group == "Immune"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Coelomocytes", low = "light gray", high = "darkgreen")
+
+epithelium_custom_dot_plot <- epithelium_custom_dot_plot +
+   geom_vline(xintercept = line_positions, linetype = "solid", color = "black")
+
+epithelium_custom_dot_plot
+
+```
+
+## 5.1.0 Dotplot Blastema GO
+
+```{r}
+
+## this is dependent on Rmd 02 of the pipeline.
+# Create a list to hold all data frames
+df_list_blastema <- list(gse_c0_df, gse_c1_df, gse_c3_df, gse_c4_df)
+
+# Add a group identifier to each data frame and combine them
+combined_df_blastema <- bind_rows(lapply(1:length(df_list_blastema), function(i) {
+  df_list_blastema[[i]] %>%
+    mutate(Group = paste("", i - 1)) %>% dplyr::filter(ONTOLOGY == "BP") %>%
+    dplyr::select(Description, Group, enrichmentScore, p.adjust) %>%
+    top_n(10, wt = enrichmentScore)
+}))
+
+combined_df_blastema <- combined_df_blastema %>%
+  # Extract numeric part from the Group and convert to numeric
+  mutate(ClusterNumber = as.numeric(gsub("Cluster ", "", Group))) %>%
+  # Convert Group to a factor with levels ordered numerically based on ClusterNumber
+  mutate(Group = factor(Group, levels = unique(Group[order(ClusterNumber)]))) %>%
+  # Arrange by ClusterNumber to get correct X-axis order
+  arrange(ClusterNumber) %>%
+  # For Y-axis: arrange by desc(Group) to get Descriptions in decreasing order by their cluster appearance
+  arrange(desc(ClusterNumber)) %>%
+  # Ensure Descriptions are treated in the order they appear, which now reflects desired Y-axis order
+  mutate(Description = factor(Description, levels = unique(Description)))
+
+dotplot_go_blastema <- ggplot(combined_df_blastema, aes(x = Group, y = Description, size = enrichmentScore, color = p.adjust)) +
+  geom_point(alpha = 0.7) +  # Adjust transparency with alpha
+  scale_size(range = c(1, 6)) +  # Adjust size range of dots
+  scale_color_gradient(low = "blue", high = "red") +  # Adjust color gradient
+  theme_bw() +
+  labs(x = "Cluster",
+       y = "GO Term",
+       size = "Enrichment Score",
+       color = "Adjusted P-Value") +
+  theme(axis.text.x = element_text(color = "black", size = 14),
+        axis.text.y = element_text(color = "black", size = 14),
+        legend.position = "right") +
+  scale_x_discrete(labels = c("0", "1", "3", "4"))
+
+dotplot_go_blastema
+
+ggsave(plot = dotplot_go_blastema, filename = "Figure7B.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 12, height = 6, dpi = 500, unit = "in", device = "png")
+
+```
+
+*UMAP specialized cells*
+
+```{r}
+
+clusters_for_col = 0:(13 - 1)
+
+cluster_colors_blastema = setNames(c('#FB3227', '#0000FFFF', 'gray', '#B1CC71FF', '#FF00B6FF', 'gray',
+                            'gray','gray', 'gray', 'gray', 'gray',
+                            'gray', 'gray'), clusters_for_col)
+
+# Define legend titles
+legend_titles_blastema = c('0', '1', '', '3', '4', '', '', '', '', '', '', '', '')
+cluster_colors_blastema = setNames(cluster_colors_blastema, legend_titles_blastema)
+
+
+```
+
+
+```{r}
+
+dimplot_fig7 <- DimPlot(all_tissues_seurat, reduction = "umap", label=F, cols = cluster_colors_blastema, pt.size = 0.6) +
+  scale_colour_manual(values = cluster_colors_blastema, 
+                      labels = function(x) {
+                        ifelse(x %in% c(''), NULL, x)
+                      }) +
+  guides(x = axis, y = axis, colour = guide_legend(override.aes = list(size=10))) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 18),
+        axis.title = element_blank(),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.key.size = unit(1, 'cm'), legend.position = 'right',
+        legend.text = element_text(size=20))
+
+dimplot_fig7
+
+```
+## Figure 7
+
+```{r}
+figure7a <- epithelium_custom_dot_plot + theme(axis.text.y = element_text(size = 18), 
+                                                    axis.text.x = element_text(size = 16), axis.title = element_text(size = 16))
+figure7b <- dotplot_go_blastema + theme(axis.text.y = element_text(size=12), axis.text.x = element_text(size = 16))
+figure7c <- dimplot_fig7
+   
+
+# Stacking plotB and plotC with height adjustments
+fig7_stack <- figure7b / figure7c 
+
+# Now combine with plotA, specifying the relative height of plotC
+figure7 <- figure7a | fig7_stack + 
+                 plot_layout(heights = c(3, 2), widths = c(2, 3))  # Adjust as needed to get the desired effect
+
+figure7 <- figure7 + plot_annotation(tag_levels = 'A')
+
+# Display the combined plot
+print(figure7)
+
+ggsave(plot = figure7, filename = "Figure7.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 20, height = 10, dpi = 500, unit = "in", device = "png")
+
+```
+
+## Final Figure 7
+
+```{r}
+
+figure7a <- epithelium_custom_dot_plot + 
+  theme(axis.text.y = element_text(size = 14),
+        axis.text.x = element_text(size = 16), 
+        axis.title = element_text(size = 16),
+        legend.key.size = unit(0.4, "cm"))
+ 
+figure7b <- dotplot_go_blastema + 
+  theme(axis.text.y = element_text(size=16),
+        axis.text.x = element_text(size = 16))
+
+figure7c <- dimplot_fig7 + theme(axis.title = element_blank())
+
+fig7_stack <- figure7a / figure7c 
+
+figure7 <- fig7_stack | figure7b
+figure7 <- figure7 + plot_annotation(tag_levels = 'A')
+figure7
+
+ggsave(plot = figure7, filename = "Fig7ABC.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 22, height = 14, dpi = 500, unit = "in", device = "png")
+
+```
+
+
+
+# 6.0 Dot Plot Specialized Population
+
+```{r}
+# Genes were selected based on their expression and how related they are to clasifying each population.
+#CLUSTER9 starts at -- g17372
+
+genes_muscle_dividing <- c('g30734',
+'g12820',
+'g4167',
+'g23550',
+'g23554',
+'g21450',
+'g1059',
+'g21935',
+'g4263',
+'g22798',
+'g17372',
+'g12467',
+'g28416',
+'g23420',
+'g19905',
+'g16331')
+
+
+dotplot_data_muscle_dividing <- all_tissues_seurat %>%
+  DotPlot(
+    features = genes_muscle_dividing,  # Replace with your gene of interest
+    assay = "RNA",
+    group.by = "cluster_groups",
+    split.by = "seurat_clusters",
+    cols = "Dark2"
+  )
+
+dotplot_data_muscle_dividing_v2 <- dotplot_data_muscle_dividing$data
+dotplot_data_muscle_dividing_v2 <- dotplot_data_muscle_dividing_v2 %>%
+  separate(id, into = c("group", "ident"), sep = "_")
+
+dotplot_data_muscle_dividing_v2$grouped_id <- factor(paste0(dotplot_data_muscle_dividing_v2$group, "_", dotplot_data_muscle_dividing_v2$ident), 
+                                                     levels = unique(paste0(dotplot_data_muscle_dividing_v2$group, "_", dotplot_data_muscle_dividing_v2$ident)))
+
+# head(human_uniprot.map)
+
+# Map IDs and create the final dataframe
+dotplot_data_muscle_dividing_v2 <- cbind(dotplot_data_muscle_dividing_v2, GeneName = human_uniprot.map$`Gene Symbol`[match(dotplot_data_muscle_dividing_v2$features.plot, human_uniprot.map$AnnotID)])
+
+# Loop to fill NA values that were created by the features.plot IDs that did not have a match in the human_uniprot.map data frame
+for(i in 1:nrow(dotplot_data_muscle_dividing_v2)) {
+  if(is.na(dotplot_data_muscle_dividing_v2$GeneName[i])) {
+    dotplot_data_muscle_dividing_v2$GeneName[i] <- as.character(dotplot_data_muscle_dividing_v2$features.plot[i])
+  }
+}
+
+#dotplot_data_v3$UniprotID <- factor(dotplot_data_v3$UniprotID, levels = unique(dotplot_data_v3$UniprotID))
+head(dotplot_data_muscle_dividing_v2)
+
+
+```
+
+
+```{r}
+
+# Find the maximum x-axis position (grouped_id) for each group
+line_positions <- dotplot_data_muscle_dividing_v2 %>%
+  group_by(group) %>%
+  summarize(line_pos = max(as.numeric(ident))) %>%
+  pull(line_pos)
+
+# Remove the last position since we don't want a line after the last group
+line_positions <- line_positions[-length(line_positions)]
+# Adjust the positions by adding 0.5
+line_positions <- line_positions + 0.5
+
+line_positions <- c(7.5, 9.5)
+
+# Initial plot with the first group's gradient
+muscle_dividing_custom_dot_plot <- ggplot(dotplot_data_muscle_dividing_v2, 
+                                          aes(x = grouped_id, y = factor(GeneName, levels = unique(GeneName)))) +
+  geom_point(data = subset(dotplot_data_muscle_dividing_v2, group == "Epithelial"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Coelomic Epithelia", low = "light gray", high = "blue") +
+  theme_classic() +
+  theme(axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 12, angle = 0, hjust = 0.5)) +
+  scale_size_continuous(range = c(0, 6),  guide = guide_legend(override.aes = list(fill = "black"))) +
+  scale_x_discrete(labels = function(x) gsub(".*_", "", x)) + 
+  labs(x = "Cluster", y = "Gene ID") +
+  new_scale_color() +  # New scale for the next group
+  
+  guides(size = guide_legend(title = "% Rep", order = 2), color = guide_legend(order = 1)) +
+  
+  # Add the second group's gradient
+  geom_point(data = subset(dotplot_data_muscle_dividing_v2, group == "Mesenchymal"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Mesenchymal", low = "light gray", high = "red") +
+  new_scale_color() +  # New scale for the next group
+  
+  # Add the third group's gradient
+  geom_point(data = subset(dotplot_data_muscle_dividing_v2, group == "Immune"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Coelomocytes", low = "light gray", high = "darkgreen")
+
+muscle_dividing_custom_dot_plot <- muscle_dividing_custom_dot_plot +
+   geom_vline(xintercept = line_positions, linetype = "solid", color = "black")
+
+muscle_dividing_custom_dot_plot
+
+
+ggsave(plot = muscle_dividing_custom_dot_plot, filename = "Figure6A.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 6, height = 8, dpi = 500, unit = "in", device = "png")
+
+```
+
+## 6.1.0 Dot Plot GO Specialized
+
+```{r}
+## this is dependent on Rmd 02 of the pipeline.
+# Create a list to hold all data frames
+df_list_specialized <- list(gse_c5_df, gse_c8_df, gse_c9_df)
+
+# Add a group identifier to each data frame and combine them
+combined_df_specialized <- bind_rows(lapply(1:length(df_list_specialized), function(i) {
+  df_list_specialized[[i]] %>%
+    mutate(Group = paste("", i - 1)) %>% dplyr::filter(ONTOLOGY == "BP") %>%
+    dplyr::select(Description, Group, enrichmentScore, p.adjust) %>%
+    top_n(10, wt = enrichmentScore)
+}))
+
+combined_df_specialized <- combined_df_specialized %>%
+  # Extract numeric part from the Group and convert to numeric
+  mutate(ClusterNumber = as.numeric(gsub("Cluster ", "", Group))) %>%
+  # Convert Group to a factor with levels ordered numerically based on ClusterNumber
+  mutate(Group = factor(Group, levels = unique(Group[order(ClusterNumber)]))) %>%
+  # Arrange by ClusterNumber to get correct X-axis order
+  arrange(ClusterNumber) %>%
+  # For Y-axis: arrange by desc(Group) to get Descriptions in decreasing order by their cluster appearance
+  arrange(desc(ClusterNumber)) %>%
+  # Ensure Descriptions are treated in the order they appear, which now reflects desired Y-axis order
+  mutate(Description = factor(Description, levels = unique(Description)))
+
+dotplot_go_specialized <- ggplot(combined_df_specialized, aes(x = Group, y = Description, size = enrichmentScore, color = p.adjust)) +
+  geom_point(alpha = 0.7) +  # Adjust transparency with alpha
+  scale_size(range = c(1, 6)) +  # Adjust size range of dots
+  scale_color_gradient(low = "blue", high = "red") +  # Adjust color gradient
+  theme_bw() +
+  labs(x = "Cluster",
+       y = "GO Term",
+       size = "Enrichment Score",
+       color = "Adjusted P-Value") +
+  theme(axis.text.x = element_text(color = "black", size = 14),
+        axis.text.y = element_text(color = "black", size = 14),
+        legend.position = "right") +
+  scale_x_discrete(labels = c("5", "8", "9"))
+
+dotplot_go_specialized
+
+ggsave(plot = dotplot_go_specialized, filename = "Figure6B.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 12, height = 6, dpi = 500, unit = "in", device = "png")
+
+```
+
+*UMAP specialized cells*
+
+```{r}
+
+clusters_for_col = 0:(13 - 1)
+
+cluster_colors_specialized = setNames(c('#0000FF', '#0000FF', 'gray', '#0000FF', '#0000FF', '#005300FF',
+                            'gray','gray', '#9A4D42FF', '#00FFBEFF', 'gray',
+                            'gray', 'gray'), clusters_for_col)
+
+
+
+# Define legend titles
+legend_titles = c('0', '1', '', '3', '4', '5', '', '', '8', '9', '', '', '')
+cluster_colors_specialized = setNames(cluster_colors_specialized, legend_titles)
+
+
+```
+
+
+```{r}
+
+dimplot_fig6 <- DimPlot(all_tissues_seurat, reduction = "umap", label=F, cols = cluster_colors_specialized, pt.size = 1) +
+  scale_colour_manual(values = cluster_colors_specialized, 
+                      labels = function(x) {
+                        ifelse(x %in% c(''), NULL, x)
+                      }) +
+  guides(x = axis, y = axis, colour = guide_legend(override.aes = list(size=10))) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 18),
+        axis.title = element_blank(),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.key.size = unit(1, 'cm'), legend.position = 'right',
+        legend.text = element_text(size=20))
+
+dimplot_fig6
+
+```
+## Figure 6
+
+```{r}
+figure6a <- muscle_dividing_custom_dot_plot + theme(axis.text.y = element_text(size = 18), 
+                                                    axis.text.x = element_text(size = 16), axis.title = element_text(size = 16))
+figure6b <- dotplot_go_specialized + theme(axis.text.y = element_text(size=12), axis.text.x = element_text(size = 16))
+figure6c <- dimplot_fig6
+   
+
+
+# Stacking plotB and plotC with height adjustments
+fig6_stack <- figure6b / figure6c 
+
+# Now combine with plotA, specifying the relative height of plotC
+figure6 <- figure6a | fig6_stack + 
+                 plot_layout(heights = c(3, 2), widths = c(2, 3))  # Adjust as needed to get the desired effect
+
+figure6 <- figure6 + plot_annotation(tag_levels = 'A')
+
+# Display the combined plot
+print(figure6)
+
+figure6 <- figure6a + figure6b + plot_annotation(tag_levels = 'A')
+
+ggsave(plot = figure6, filename = "Figure6A-B.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 20, height = 10, dpi = 500, unit = "in", device = "png")
+
+```
+
+
+## Final Figure 6
+
+```{r}
+
+figure6a <- muscle_dividing_custom_dot_plot + 
+  theme(axis.text.y = element_text(size = 12),
+        axis.text.x = element_text(size = 16), 
+        axis.title = element_text(size = 16),
+        legend.key.size = unit(0.32, "cm"))
+ 
+figure6b <- dotplot_go_specialized + 
+  theme(axis.text.y = element_text(size=16),
+        axis.text.x = element_text(size = 16))
+
+figure6c <- dimplot_fig6 + theme(axis.title = element_blank())
+
+fig6_stack <- figure6a / figure6c 
+
+figure6 <- fig6_stack | figure6b
+figure6 <- figure6 + plot_annotation(tag_levels = 'A')
+figure6
+
+ggsave(plot = figure6, filename = "Fig6ABC.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 20, height = 10, dpi = 500, unit = "in", device = "png")
+
+```
+
+
+# 7.0 Dot Plot Immune
+
+```{r}
+# Genes were selected based on their expression and how related they are to clasifying each population.
+
+genes_immune <- c("g11511",
+"g12320",
+"g18738",
+"g25150",
+"g3433", 
+"g29212", #6
+"g24629",
+"g10761",
+"g21526",
+"g29210",
+"g28948",
+"g17648", #10
+"g1869",
+"g29680",
+"g1868",
+"g29679",
+"g1891", #11
+"g11013",
+"g19826",
+"g10707",
+"g5940",
+"g9004") #12
+
+
+dotplot_data_immune <- all_tissues_seurat %>%
+  DotPlot(
+    features = genes_immune,  # Replace with your gene of interest
+    assay = "RNA",
+    group.by = "cluster_groups",
+    split.by = "seurat_clusters",
+    cols = "Dark2"
+  )
+
+dotplot_data_immune_v2 <- dotplot_data_immune$data
+dotplot_data_immune_v2 <- dotplot_data_immune_v2 %>%
+  separate(id, into = c("group", "ident"), sep = "_")
+
+dotplot_data_immune_v2$grouped_id <- factor(paste0(dotplot_data_immune_v2$group, "_", dotplot_data_immune_v2$ident), levels = unique(paste0(dotplot_data_immune_v2$group, "_", dotplot_data_immune_v2$ident)))
+
+# head(human_uniprot.map)
+
+# Map IDs and create the final dataframe
+dotplot_data_immune_v2 <- cbind(dotplot_data_immune_v2, GeneName = human_uniprot.map$`Gene Symbol`[match(dotplot_data_immune_v2$features.plot, human_uniprot.map$AnnotID)])
+
+# Loop to fill NA values that were created by the features.plot IDs that did not have a match in the human_uniprot.map data frame
+for(i in 1:nrow(dotplot_data_immune_v2)) {
+  if(is.na(dotplot_data_immune_v2$GeneName[i])) {
+    dotplot_data_immune_v2$GeneName[i] <- as.character(dotplot_data_immune_v2$features.plot[i])
+  }
+}
+
+#dotplot_data_v3$UniprotID <- factor(dotplot_data_v3$UniprotID, levels = unique(dotplot_data_v3$UniprotID))
+head(dotplot_data_immune_v2)
+
+
+```
+
+```{r}
+
+# Find the maximum x-axis position (grouped_id) for each group
+line_positions <- dotplot_data_immune_v2 %>%
+  group_by(group) %>%
+  summarize(line_pos = max(as.numeric(ident))) %>%
+  pull(line_pos)
+
+# Remove the last position since we don't want a line after the last group
+line_positions <- line_positions[-length(line_positions)]
+# Adjust the positions by adding 0.5
+line_positions <- line_positions + 0.5
+
+line_positions <- c(7.5, 9.5)
+
+# Initial plot with the first group's gradient
+immune_custom_dot_plot <- ggplot(dotplot_data_immune_v2, aes(x = grouped_id, y = factor(GeneName, levels = unique(GeneName)))) +
+  geom_point(data = subset(dotplot_data_immune_v2, group == "Epithelial"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Coelomic Epithelia", low = "light gray", high = "blue") +
+  theme_classic() +
+  theme(axis.text.y = element_text(color = "black", size = 10),
+        axis.text.x = element_text(color = "black", size = 12, angle = 0, hjust = 0.5)) +
+  scale_size_continuous(range = c(0, 6),  guide = guide_legend(override.aes = list(fill = "black"))) +
+  scale_x_discrete(labels = function(x) gsub(".*_", "", x)) + 
+  labs(x = "Clusters", y = "Gene ID") +
+  new_scale_color() +  # New scale for the next group
+  
+  guides(size = guide_legend(title = "% Rep", order = 2), color = guide_legend(order = 1)) +
+  
+  # Add the second group's gradient
+  geom_point(data = subset(dotplot_data_immune_v2, group == "Mesenchymal"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Mesenchymal", low = "light gray", high = "red") +
+  new_scale_color() +  # New scale for the next group
+  
+  # Add the third group's gradient
+  geom_point(data = subset(dotplot_data_immune_v2, group == "Immune"), 
+             aes(size = pct.exp, color = avg.exp.scaled), shape = 16) +
+  scale_color_gradient(name = "Coelomocyte", low = "light gray", high = "darkgreen")
+
+immune_custom_dot_plot <- immune_custom_dot_plot +
+   geom_vline(xintercept = line_positions, linetype = "solid", color = "black")
+
+immune_custom_dot_plot
+
+```
+
+## 7.1.0 Dotplot GO Immune
+
+```{r}
+## this is dependent on Rmd 02 of the pipeline.
+# Create a list to hold all data frames
+df_list_immune <- list(gse_c6_df, gse_c10_df, gse_c11_df, gse_c12_df)
+
+# Add a group identifier to each data frame and combine them
+combined_df_immune <- bind_rows(lapply(1:length(df_list_immune), function(i) {
+  df_list_immune[[i]] %>%
+    mutate(Group = paste("", i - 1)) %>% dplyr::filter(ONTOLOGY == "BP") %>%
+    dplyr::select(Description, Group, enrichmentScore, p.adjust) %>%
+    top_n(10, wt = enrichmentScore)
+}))
+
+combined_df_immune <- combined_df_immune %>%
+  # Extract numeric part from the Group and convert to numeric
+  mutate(ClusterNumber = as.numeric(gsub("Cluster ", "", Group))) %>%
+  # Convert Group to a factor with levels ordered numerically based on ClusterNumber
+  mutate(Group = factor(Group, levels = unique(Group[order(ClusterNumber)]))) %>%
+  # Arrange by ClusterNumber to get correct X-axis order
+  arrange(ClusterNumber) %>%
+  # For Y-axis: arrange by desc(Group) to get Descriptions in decreasing order by their cluster appearance
+  arrange(desc(ClusterNumber)) %>%
+  # Ensure Descriptions are treated in the order they appear, which now reflects desired Y-axis order
+  mutate(Description = factor(Description, levels = unique(Description)))
+
+dotplot_go_immune <- ggplot(combined_df_immune, aes(x = Group, y = Description, size = enrichmentScore, color = p.adjust)) +
+  geom_point(alpha = 0.7) +  # Adjust transparency with alpha
+  scale_size(range = c(1, 6)) +  # Adjust size range of dots
+  scale_color_gradient(low = "blue", high = "red") +  # Adjust color gradient
+  theme_bw() +
+  labs(x = "Cluster",
+       y = "GO Term",
+       size = "Enrichment Score",
+       color = "Adjusted P-Value") +
+  theme(axis.text.x = element_text(color = "black", size = 14),
+        axis.text.y = element_text(color = "black", size = 14),
+        legend.position = "right") +
+  scale_x_discrete(labels = c("6", "10", "11", "12"))
+
+dotplot_go_immune
+
+ggsave(plot = dotplot_go_immune, filename = "Figure8C.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 12, height = 6, dpi = 500, unit = "in", device = "png")
+
+```
+
+## Figure 4
+
+```{r}
+
+figure8a <- immune_custom_dot_plot + theme(axis.text.y = element_text(size = 14), 
+                                                    axis.text.x = element_text(size = 16), axis.title = element_text(size = 16))
+figure8b <- dotplot_go_immune + theme(axis.text.y = element_text(size=16), axis.text.x = element_text(size = 16))
+figure8c <- dimplot_fig3 + theme(axis.title = element_blank())
+   
+# Stacking plotB and plotC with height adjustments
+fig8_stack <- figure8a / figure8c 
+
+# Now combine with plotA, specifying the relative height of plotC
+#figure8 <- figure8a | fig8_stack + 
+#                 plot_layout(heights = c(3, 1), widths = c(2, 3))  # Adjust as needed to get the desired effect
+
+figure8 <- fig8_stack | figure8b
+figure8 <- figure8 + plot_annotation(tag_levels = 'A')
+
+# Display the combined plot
+print(figure8)
+
+ggsave(plot = figure8, filename = "Fig4ABC.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 24, height = 14, dpi = 500, unit = "in", device = "png")
+
+```
+
+
+# 8.0 Export FeaturePlots Individually
+
+```{r}
+
+axis.fp <- ggh4x::guide_axis_truncated(
+  trunc_lower = unit(0, "npc"),
+  trunc_upper = unit(0.5, "cm")
+)
+
+#0
+g12472 <- FeaturePlot(all_tissues_seurat, "g12472", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C0 - ") ~ italic("TRFM"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g12472 <- g12472 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+#1
+g22644 <- FeaturePlot(all_tissues_seurat, "g22644", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C1 - ") ~ italic("g22644"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g22644 <- g22644 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+#2
+g23506 <- FeaturePlot(all_tissues_seurat, "g23506", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C2 - ") ~ italic("ECM2"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g23506 <- g23506 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+
+#3
+g6257 <- FeaturePlot(all_tissues_seurat, "g6257", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C3 - ") ~ italic("g6257"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g6257 <- g6257 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+#4
+g2505 <- FeaturePlot(all_tissues_seurat, "g2505", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C4 - ") ~ italic("KCNQ5"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g2505 <- g2505 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+
+#5
+g2098 <- FeaturePlot(all_tissues_seurat, "g2098", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C5 - ") ~ italic("TITIN"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g2098 <- g2098 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+#6
+g11511 <- FeaturePlot(all_tissues_seurat, "g11511", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C6 - ") ~ italic("FBCD1"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g11511 <- g11511 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+#7
+g2546 <- FeaturePlot(all_tissues_seurat, "g2546", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C7 - ") ~ italic("g2546"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g2546 <- g2546 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+#8
+g21450 <- FeaturePlot(all_tissues_seurat, "g21450", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C8 - ") ~ italic("SMC2"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g21450 <- g21450 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+#9
+g841 <- FeaturePlot(all_tissues_seurat, "g841", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C9 - ") ~ italic("CELF3"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g841 <- g841 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+#10
+g4113 <- FeaturePlot(all_tissues_seurat, "g4113", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C10 - ") ~ italic("g4113"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g4113 <- g4113 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+#11
+g5907 <- FeaturePlot(all_tissues_seurat, "g5907", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C11 - ") ~ italic("g5907"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g5907 <- g5907 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+#12
+g11013 <- FeaturePlot(all_tissues_seurat, "g11013", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C12 - ") ~ italic("BAR3"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g11013 <- g11013 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+#supra-clusterA
+g26002 <- FeaturePlot(all_tissues_seurat, "g26002", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("Supra cluster A - ") ~ italic("AHNK"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g26002 <- g26002 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+#supra-cluster B
+g24678 <- FeaturePlot(all_tissues_seurat, "g24678", pt.size = 0.01, min.cutoff = 1, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("Supra cluster B - ") ~ italic("ERG"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g24678 <- g24678 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 8),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.3, 'cm'),
+        axis.text=element_text(size=5))
+
+feature_plots_list <- list(g12472, g22644, g23506, g6257, g14771, g2098, 
+                      g11511, g24678, g21450, g28416, g11013, g5907, g17661)
+
+for (i in seq_along(feature_plots_list)) {
+  ggsave(
+    filename = paste0("./02_COUNTSwoMito/01_RESULTS/01_INTEGRATION_20/01_MARKERS/00_FEATURES_PLOTS/plot_", i, ".jpeg"),
+    plot = feature_plots_list[[i]],
+    width = 4, height = 4, dpi = 300
+  )
+}
+
+## multi featureplot
+
+top_pct_dif <- c("g12472", "g22644", "g23506", "g6257", "g14771", "g2098", 
+                      "g11511", "g24678", "g21450", "g28416", "g4113", "g5907", "g11013", "g26002", "g24678")
+
+FeaturePlot(all_tissues_seurat, features = top_pct_dif, min.cutoff = 1, max.cutoff = 10, ncol=3, pt.size = 0.5) &
+  theme(plot.title = element_text(size = 8, hjust = -0.02),
+        axis.text.y = element_text(color = "black", size = 8),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text.x = element_text(color = "black", size = 8),
+        axis.text=element_text(size=8),
+        axis.title=element_text(size=8,face="bold")) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey75")))
+
+
+feature_plots_list <- list(g12472, g22644, g23506, g6257, g2505, g2098, 
+                      g11511, g2546, g21450, g841, g4113, g5907, g11013, g26002, g24678)
+
+fig2 <- wrap_plots(feature_plots_list, ncol = 3)
+fig2 <- fig2 + 
+  plot_annotation(tag_levels = 'A')
+
+
+########
+
+
+# WNT9 = g22968
+# RL11 = g2145
+# RL12 = g28273
+#g31035
+# 2991g4873
+FeaturePlot(all_tissues_seurat, features = "g11013", min.cutoff = 1, 
+            max.cutoff = 5, pt.size = 1, order = TRUE) &
+  guides(x = axis, y = axis) &
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey75")))
+
+```
+
+## Figure 5 - Wnt9 and SAA
+
+```{r}
+
+s3Afig <- FeaturePlot(all_tissues_seurat, features = "g12505", min.cutoff = 1, 
+            max.cutoff = 5, pt.size = 1, order = TRUE) &
+  guides(x = axis, y = axis) & labs(title = "PRG4") &
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 12),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 18, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=12),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey75")))
+
+s3Bfig <- FeaturePlot(all_tissues_seurat, features = "g22968", min.cutoff = 1, 
+            max.cutoff = 5, pt.size = 1, order = TRUE) &
+  guides(x = axis, y = axis) & labs(title = "WNT9") &
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 12),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 18, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=12),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey75")))
+
+
+s3Cfig <- FeaturePlot(all_tissues_seurat, features = "g23025", min.cutoff = 1, 
+            max.cutoff = 5, pt.size = 1, order = TRUE) &
+  guides(x = axis, y = axis) & labs(title = "SAA1") &
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 12),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 18, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=12),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey75")))
+
+s3fig <- s3Afig | s3Bfig # "| s3Cfig"
+
+s3fig <- s3fig + plot_annotation(tag_levels = 'A')
+
+ggsave(plot = s3fig, filename = "FigureS3.png", 
+       path = "/Users/joshuagmedina/Library/CloudStorage/Dropbox/01-DEVNEURO-LAB/34-scRNA-seq/00-PLOSBIOL/01_FIGURES/",
+       width = 18, height = 6, dpi = 500, unit = "in", device = "png")
+
+```
+
+
+
+```{r}
+
+s3Dfig <- FeaturePlot(all_tissues_seurat, features = "g6979", min.cutoff = 1, 
+            max.cutoff = 5, pt.size = 1, order = TRUE) &
+  guides(x = axis, y = axis) & labs(title = "PIWL1") &
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 12),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 18, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=12),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey75")))
+
+s3Efig <- FeaturePlot(all_tissues_seurat, features = "g22161", min.cutoff = 1, 
+            max.cutoff = 5, pt.size = 1, order = TRUE) &
+  guides(x = axis, y = axis) & labs(title = "YAP1") &
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 12),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 18, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=12),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey75")))
+
+s3Ffig <- FeaturePlot(all_tissues_seurat, features = "g16763", min.cutoff = 1, 
+            max.cutoff = 5, pt.size = 1, order = TRUE) &
+  guides(x = axis, y = axis) & labs(title = "HES1") &
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 12),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 18, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=12),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey75")))
+
+
+s4figv1 <- (s3Afig | s3Bfig | s3Cfig) / (s3Dfig | s3Efig | s3Ffig)
+s4figv1 <- s4figv1 + plot_annotation(tag_levels = 'A')
+s4figv1
+
+
+
+
+```
+
+
+
+
+
+```{r}
+
+
+s4figA <- VlnPlot(renamed_all_tissues_seurat, features = "g6979", pt.size = 0.5, cols = clusters_for_col_renamed) &
+  labs(title = "PIWL1", y = "Exp. Level") &
+  theme(
+        text = element_text(size = 18),
+        axis.title.x = element_blank(),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_text(size = 14, color = "black", face = "bold"), 
+        axis.title.y = element_text(size = 14, color = "black", face = "bold"),
+        legend.title=element_blank(), legend.position = "none",
+        plot.title = element_text(size = 18, hjust = -0.0, vjust = -0.5),
+        legend.text=element_text(size=12),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)
+        )
+
+s4figB <- VlnPlot(renamed_all_tissues_seurat, features = "g22161", pt.size = 0.5, cols = clusters_for_col_renamed) &
+  labs(title = "YAP1", y = "Exp. Level") &
+  theme(
+        text = element_text(size = 18),
+        axis.title.x = element_blank(),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_text(size = 14, color = "black", face = "bold"), 
+        axis.title.y = element_text(size = 14, color = "black", face = "bold"),
+        legend.title=element_blank(), legend.position = "none",
+        plot.title = element_text(size = 18, hjust = -0.0, vjust = -0.5),
+        legend.text=element_text(size=12),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)
+        )
+
+s4figC <- VlnPlot(renamed_all_tissues_seurat, features = "g16763", pt.size = 0.5, cols = clusters_for_col_renamed) &
+  labs(title = "HES1", y = "Exp. Level") &
+  theme(
+        text = element_text(size = 18),
+        axis.title.x = element_blank(),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_text(size = 14, color = "black", face = "bold"), 
+        axis.title.y = element_text(size = 14, color = "black", face = "bold"),
+        legend.title=element_blank(), legend.position = "none",
+        plot.title = element_text(size = 18, hjust = -0.0, vjust = -0.5),
+        legend.text=element_text(size=12),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)
+        )
+
+s4figD <- VlnPlot(renamed_all_tissues_seurat, features = "g23025", pt.size = 0.5, cols = clusters_for_col_renamed) &
+  labs(title = "SAA1", y = "Exp. Level") &
+  theme(
+        text = element_text(size = 18),
+        axis.title.x = element_text(size = 14, color = "black", face = "bold"),
+        axis.text.x=element_text(angle = 0, size = 14, color = "black", face = "bold"), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_text(size = 14, color = "black", face = "bold"), 
+        axis.title.y = element_text(size = 14, color = "black", face = "bold"),
+        legend.title=element_blank(), legend.position = "none",
+        plot.title = element_text(size = 18, hjust = -0.0, vjust = -0.5),
+        legend.text=element_text(size=12),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)
+        )
+
+s4fig <- s4figA / s4figB / s4figC / s4figD
+
+s4fig <- s4fig + plot_annotation(tag_levels = 'A')
+s4fig
+
+
+```
+
+ 
+```{r}
+
+s4fig_final <- s3fig / s4fig #+ plot_annotation(tag_levels = 'A')
+s4fig_final
+
+```
+
+
+Cells expressing Wnt9
+
+```{r}
+
+wnt9 <- FetchData(all_tissues_seurat, vars = c("tissue", "g22968"))
+
+wnt9$expressing <- wnt9[,"g22968"] > 1
+
+wnt9 %>%
+  group_by(tissue) %>%
+  summarise(ExpressingCells = sum(expressing)) %>%
+  print()
+
+# SAA: g23025
+saa <- FetchData(all_tissues_seurat, vars = c("tissue", "g23025"))
+saa$expressing <- saa[,"g23025"] > 1
+
+saa %>%
+  group_by(tissue) %>%
+  summarise(ExpressingCells = sum(expressing)) %>%
+  print()
+
+```
+
+
+
+
+```{r}
+
+g30734 <- FeaturePlot(all_tissues_seurat, "g30734", pt.size = 0.5, min.cutoff = 2, max.cutoff = 10, order = TRUE) &
+  guides(x = axis.fp, y = axis.fp) & labs(title = expression(bold("C0 - ") ~ italic("MYH7"))) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey80")))
+g30734 <- g30734 + theme(axis.line = element_line(arrow = arrow(length = unit(0.1, "cm"), type="closed")),
+        text = element_text(size = 16),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 16, hjust = -0.02, vjust = -1.5),
+        legend.text=element_text(size=12),
+        legend.key.size = unit(0.5, 'cm'),
+        axis.text=element_text(size=5))
+g30734
+
+```
+
+# TESTING PROLIFERATING CELLS 
+
+```{r}
+
+# Assuming 'seurat_obj' is your Seurat object and 'cluster_id' is the cluster of interest
+seurat_tmp <- all_tissues_seurat
+# Step 1: Identify cells in the cluster of interest
+cluster_cells <- WhichCells(seurat_tmp, idents = c(8,0,1,3,4))
+
+# Step 2: Identify the genes you want to mask ("g21450", "g1059", "g21935")
+genes_to_mask <- c("g21450", "g1059", "g21935", "g4263", "g19273", "g25761",
+                   "g22798", "g14943", "g22957", "g15061", "g4842", "g13595",
+                   "g3600", "g31868", "g20656", "g2263", "g12709", "g24076"
+                   )
+
+# Step 3: Mask the expression of these genes by setting their expression levels to 0 for the selected cluster
+seurat_tmp@assays$RNA@data[genes_to_mask, cluster_cells] <- 0
+
+# Step 4: Re-run clustering or any downstream analysis to see the effects
+
+seurat_tmp <- FindVariableFeatures(seurat_tmp, nfeatures = 2000)
+seurat_tmp <- ScaleData(seurat_tmp)
+seurat_tmp <- RunPCA(seurat_tmp, npcs = 50)
+seurat_tmp <- RunUMAP(seurat_tmp, dims = 1:20)
+seurat_tmp <- FindNeighbors(seurat_tmp, dims = 1:20) %>% FindClusters(resolution = 0.5)
+
+# Step 5: Visualize the new clusters
+#DimPlot(seurat_tmp, reduction = "umap", group.by = "ident")
+
+
+```
+
+
+```{r}
+
+DimPlot(seurat_tmp, reduction = "umap", label=T, cols = cluster_colors, pt.size = 1.5) + 
+  guides(x = axis, y = axis, colour = guide_legend(override.aes = list(size=10))) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 18),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.key.size = unit(1, 'cm'),
+        legend.text = element_text(size=20))
+
+```
+
+```{r}
+
+avg_expr_tmp <- AverageExpression(seurat_tmp, return.seurat = FALSE)$RNA
+
+correlation_matrix_tmp <- cor(avg_expr_tmp)
+
+masked_corr <- pheatmap(correlation_matrix_tmp, 
+         display_numbers = TRUE, 
+         clustering_distance_rows = "correlation", 
+         clustering_distance_cols = "correlation",
+         main = "Masked Proliferation Genes in Cluster 8")
+```
+
+
+```{r}
+
+avg_expr_tmp_2 <- AverageExpression(all_tissues_seurat, return.seurat = FALSE)$RNA
+
+correlation_matrix_tmp_2 <- cor(avg_expr_tmp_2)
+
+normal_corr <- pheatmap(correlation_matrix_tmp_2, 
+         display_numbers = TRUE, 
+         clustering_distance_rows = "correlation", 
+         clustering_distance_cols = "correlation",
+         main = "Normal Clusters")
+
+```
+
+
+

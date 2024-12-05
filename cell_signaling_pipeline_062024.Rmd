@@ -1,0 +1,440 @@
+---
+title: "Fucntional Annotation - Cell Signaling"
+author: "Joshua G. Medina-Feliciano"
+date: "2024-06-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# CHANGE TO WHAT CORRESPONDS TO YOU
+knitr::opts_knit$set(root.dir = '01-DEVNEURO-LAB/34-scRNA-seq/08-SCRNA-HGLABv4/')
+```
+
+# 1.0 Loading libraries
+
+_Check if any of this libraries are required_
+
+```{r}
+
+# library(Seurat)
+# library(ggplot2)
+# library(dplyr)
+# library(DESeq2)
+# library(SoupX)
+# library(hdf5r)
+# library(scCustomize)
+# library(DropletUtils)
+# library(cowplot)
+# library(metap)
+# library(scater)
+# library(TSCAN)
+# library(readr)
+# library(RColorBrewer)
+# library(patchwork)
+# library(tidyverse)
+# library(ggnewscale)
+# library(reshape2)
+# library(pcaMethods)
+# library(velocyto.R)
+# library(SeuratWrappers)
+# library(SeuratDisk)
+# library(AnnotationHub)
+# library(clusterProfiler)
+# library(DOSE)
+# library(org.Hs.eg.db)
+# library(decoupleR)
+
+```
+
+
+- Note: I don't think all of them are required. But just in case.
+```{r}
+
+library(Seurat)
+library(ComplexHeatmap)
+library(presto)
+library(CellChat)
+library(NMF)
+
+```
+
+- Reference to package manual and tutorial:
+  - http://www.cellchat.org
+  - https://github.com/jinworks/CellChat
+  - Article: https://www.nature.com/articles/s41467-021-21246-9
+
+# 1.1 Load RDS of Seurat object
+
+```{r}
+
+#all_tissues_seurat <- readRDS(file = "00_DATA/sobj_tissue_comb_08res.v1.rds")
+
+```
+
+# 2. Prepare reference files
+
+## 2.1 Import human Uniprot metadata
+```{r}
+
+human_uniprot.metadata <- read_delim(
+  file = "00_DATA/UP000005640_9606.hsapUniprot.metadata.tsv", 
+  delim = "\t", 
+  col_names = TRUE)
+
+
+head(human_uniprot.metadata)
+
+```
+
+## 2.2 Import features table for Humans
+
+```{r}
+
+human_ncbi.metadata <- read_delim(
+  file = "00_DATA/GCF_000001405.40_GRCh38.p14_feature_table.txt", 
+  delim = "\t", 
+  col_names = TRUE)
+
+head(human_ncbi.metadata)
+
+```
+
+```{r}
+
+human_ncbi.metadata_subset <- human_ncbi.metadata %>% filter(class == "with_protein") %>% dplyr::select(product_accession, GeneID)
+
+head(human_ncbi.metadata_subset)
+
+```
+
+
+## 2.4 Import Human BLASTp results
+
+```{r}
+
+hsap_blastp.df <- read_delim(
+  file = "00_REFS/02_HUMAN_NCBI/augustus_hints_w_utr.v4.human_ncbi.map.tsv", 
+  delim = "\t", 
+  col_names = FALSE)
+
+colnames(hsap_blastp.df) <- c('qseqid', 'product_accession')
+hsap_blastp.df$qseqid <- sub("\\..*$", "", hsap_blastp.df$qseqid)
+head(hsap_blastp.df)
+
+```
+
+### 2.4.1 Creating mapping data frame
+
+```{r}
+
+hsap_blastp.df <- hsap_blastp.df[!duplicated(hsap_blastp.df$qseqid), ]
+
+hsap_mapping_df_tmp <- inner_join(hsap_blastp.df, human_ncbi.metadata_subset, by = "product_accession")
+hasap_geneID_mapping_df <- hsap_mapping_df_tmp %>% dplyr::select(qseqid, GeneID)
+
+head(hasap_geneID_mapping_df)
+
+```
+
+# 3.0 Setting up data for CellChat
+
+```{r}
+
+reg_tissues <- all_tissues_seurat
+
+# Make sure yuou are RNA assay is active and not the integrated.
+DefaultAssay(reg_tissues) <- "RNA"
+dim(reg_tissues)
+
+```
+
+## 3.1 Get count matrix
+
+```{r}
+
+reg_tissues_mtx <- as.matrix(reg_tissues@assays$RNA@data)
+head(reg_tissues_mtx[1:20,1:20])
+
+```
+
+*Creating Mapping Table*
+
+```{r}
+
+human_ncbi.metadata_symbols_subset <- human_ncbi.metadata %>% filter(class == "with_protein") %>% dplyr::select(product_accession, symbol)
+
+head(human_ncbi.metadata_symbols_subset)
+
+
+```
+
+```{r}
+hsap_symbol_mapping_df_tmp <- inner_join(hsap_blastp.df, human_ncbi.metadata_symbols_subset, by = "product_accession")
+hasap_symbol_mapping_df <- hsap_symbol_mapping_df_tmp %>% dplyr::select(symbol, qseqid)
+
+head(hasap_symbol_mapping_df)
+dim(hasap_symbol_mapping_df)
+```
+
+*Filter matrix for genes that only have human match*
+```{r}
+
+reg_tissues_mtx <- reg_tissues_mtx[hasap_symbol_mapping_df$qseqid,]
+reg_tissues_mtx[1:10,1:20]
+```
+
+*Change rownames of the matrix*
+```{r}
+rownames(reg_tissues_mtx) <- hasap_symbol_mapping_df$symbol
+storage.mode(reg_tissues_mtx) <- "integer"
+reg_tissues_mtx[1:10,1:20]
+```
+
+*Create seurat object*
+
+```{r}
+
+hsap_sobj <- CreateSeuratObject(counts = reg_tissues_mtx, meta.data = reg_tissues@meta.data, )
+dim(hsap_sobj)
+
+hsap_sobj[["umap"]] <- reg_tissues[["umap"]]
+
+Idents(hsap_sobj) <- Idents(reg_tissues)
+ 
+ # Rename identity classes
+hsap_sobj <- RenameIdents(object = hsap_sobj, `0` = "C0", `1` = "C1", `2` = "C2",
+                          `3` = "C3", `4` = "C4", `5` = "C5", `6` = "C6",
+                          `7` = "C7", `8` = "C8", `9` = "C9",
+                          `10` = "C10", `11` = "C11", `12` = "C12")
+
+```
+
+- Check that everything looks good.
+
+```{r}
+# Confirm that everything is in order.
+#library(ggh4x)
+
+axis <- ggh4x::guide_axis_truncated(
+  trunc_lower = unit(0, "npc"),
+  trunc_upper = unit(2, "cm")
+)
+
+
+# Check that identities names are correct...
+
+DimPlot(hsap_sobj, reduction = "umap", label=F) + 
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank())
+```
+
+
+```{r}
+
+# Try searching by human gene symbol....
+
+FeaturePlot(hsap_sobj, features = "FZD7", min.cutoff = 1, 
+            max.cutoff = 10, pt.size = 1, order = TRUE) &
+  guides(x = axis, y = axis) &
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_text(size = 8, hjust = -0.02),
+        legend.text=element_text(size=8),
+        legend.key.size = unit(0.4, 'cm'),
+        axis.text=element_text(size=8)) &
+  scale_colour_gradientn(colours = rev(c("dark red", "red", "grey75")))
+
+```
+
+
+*Getting data for CellChat*
+
+```{r}
+
+cc_hsap_mtx <- hsap_sobj[["RNA"]]@data # normalized data matrix
+cc_cell_labels <- Idents(hsap_sobj)
+cc_meta <- data.frame(labels = labels, row.names = names(labels)) # create a dataframe of the cell labels
+
+```
+
+```{r}
+
+cellChat <- createCellChat(object = hsap_sobj, group.by = "ident", assay = "RNA")
+
+```
+
+# Ligand-receptor Interaction DB
+
+```{r}
+
+CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
+showDatabaseCategory(CellChatDB)
+
+```
+
+```{r}
+
+CellChatDB.use <- CellChatDB
+cellChat@DB <- CellChatDB.use
+
+```
+
+```{r}
+
+cellChat <- subsetData(cellChat)
+
+```
+
+```{r}
+
+cellChat <- identifyOverExpressedGenes(cellChat)
+cellChat <- identifyOverExpressedInteractions(cellChat)
+
+```
+
+```{r}
+
+cellChat <- computeCommunProb(cellChat, type = "truncatedMean", trim = 0.1)
+
+```
+
+
+```{r}
+
+cellChat <- filterCommunication(cellChat, min.cells = 10, rare.keep = T)
+
+```
+
+```{r}
+
+cc_df.net <- subsetCommunication(cellChat)
+#df.net <- subsetCommunication(cellchat, sources.use = c(1,2), targets.use = c(4,5))
+#df.net <- subsetCommunication(cellchat, signaling = c("WNT", "TGFb"))
+```
+
+
+```{r}
+
+cellChat <- computeCommunProbPathway(cellChat)
+
+```
+
+
+```{r}
+cellChat <- aggregateNet(cellChat)
+
+```
+
+
+```{r}
+
+groupSize <- as.numeric(table(cellChat@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(cellChat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellChat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+
+```
+
+
+```{r}
+
+mat <- cellChat@net$weight
+par(mfrow = c(3,5), xpd=TRUE)
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, edge.weight.max = max(mat), title.name = rownames(mat)[i])
+}
+
+```
+
+*Visualization of specific pathways*
+
+```{r}
+
+pathways.show <- c("L1CAM")
+# Hierarchy plot
+# Here we define `vertex.receive` so that the left portion of the hierarchy plot shows signaling to fibroblast and the right portion shows signaling to immune cells 
+vertex.receiver = seq(1,4) # a numeric vector. 
+netVisual_aggregate(cellChat, signaling = pathways.show, vertex.receiver = vertex.receiver)
+# Circle plot
+par(mfrow=c(1,1))
+netVisual_aggregate(cellChat, signaling = pathways.show, layout = "circle")
+
+```
+
+
+```{r}
+netAnalysis_contribution(cellChat, signaling = pathways.show)
+```
+
+
+```{r}
+
+# Access all the signaling pathways showing significant communications
+pathways.show.all <- cellChat@netP$pathways
+# check the order of cell identity to set suitable vertex.receiver
+levels(cellChat@idents)
+vertex.receiver = seq(1,4)
+for (i in 1:length(pathways.show.all)) {
+  # Visualize communication network associated with both signaling pathway and individual L-R pairs
+  netVisual(cellChat, signaling = pathways.show.all[i], vertex.receiver = vertex.receiver, layout = "hierarchy")
+  # Compute and visualize the contribution of each ligand-receptor pair to the overall signaling pathway
+  gg <- netAnalysis_contribution(cellChat, signaling = pathways.show.all[i])
+  ggsave(filename=paste0(pathways.show.all[i], "_L-R_contribution.pdf"), plot=gg, width = 3, height = 2, units = 'in', dpi = 300)
+}
+
+```
+
+
+```{r}
+
+plotGeneExpression(cellChat, signaling = "Netrin", enriched.only = TRUE, type = "dot", color.use = brewer.pal(10,"Accent"))
+plotGeneExpression(cellChat, signaling = "Netrin", enriched.only = TRUE, type = "violin")
+
+```
+
+
+*Network Centrality Scores*
+
+```{r}
+
+cellChat <- netAnalysis_computeCentrality(cellChat, slot.name = "netP")
+
+```
+
+```{r}
+netAnalysis_signalingRole_network(cellChat, signaling = pathways.show, width = 8, height = 2.5, font.size = 10)
+```
+
+```{r}
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+gg1 <- netAnalysis_signalingRole_scatter(cellChat)
+gg1
+```
+
+
+```{r}
+
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+ht1 <- netAnalysis_signalingRole_heatmap(cellChat, pattern = "outgoing")
+ht2 <- netAnalysis_signalingRole_heatmap(cellChat, pattern = "incoming")
+ht1 + ht2
+
+```
+
+
+

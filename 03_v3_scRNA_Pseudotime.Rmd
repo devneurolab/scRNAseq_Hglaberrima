@@ -1,0 +1,367 @@
+---
+title: "pseudotime_test"
+author: "Joshua G. Medina-Feliciano"
+date: "2024-05-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# 3.0 Velocity Analysis Subset 1
+
+-   Subset 1: composed of all clusters of the big cluster group (0,1,3,4,5,9,8), which correspond to epithelial layer populations.
+
+```{r}
+
+slingshot_all <- all.combined.velo
+
+# Adding metadata to keep the original cluster number
+
+slingshot_all$orig_cluster.0.5 <- all.combined.velo$seurat_clusters
+DefaultAssay(slingshot_all) <- "integrated"
+
+```
+
+```{r}
+
+epithelial_cluster_colors = setNames(c('#FF0000FF', '#0000FFFF', '#00FF00FF', '#B1CC71FF', '#FF00B6FF', '#005300FF',
+                            '#FFA500','#999999', '#9A4D42FF', '#00FFBEFF', '#783FC1FF',
+                            '#1F9698FF', '#FFACFDFF'), clusters_for_col)
+
+DimPlot(slingshot_all, reduction = "umap", label=F, group.by = 'orig_cluster.0.5', cols=epithelial_cluster_colors, pt.size=2) +
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_blank()
+        )
+
+```
+
+```{r}
+
+VlnPlot(slingshot_all, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2, group.by = "orig.ident")
+#epithelial_subset1 <- subset(epithelial_subset1, subset = nFeature_RNA > 50 & nFeature_RNA < 7500 & nCount_RNA < 30000)
+#VlnPlot(epithelial_subset1, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2, group.by = "orig.ident")
+
+```
+
+```{r}
+
+slingshot_all <- ScaleData(slingshot_all)
+#epithelial_subset1 <- FindVariableFeatures(epithelial_subset1, nfeatures = 2000)
+slingshot_all <- RunPCA(slingshot_all, npcs = 50)
+
+slingshot_all <- RunUMAP(slingshot_all, dims = 1:20)
+slingshot_all <- FindNeighbors(slingshot_all, dims = 1:20) %>% FindClusters(resolution = 0.5)
+
+```
+
+```{r}
+
+DimPlot(slingshot_all, reduction = "umap", label=F, group.by = 'orig_cluster.0.5', cols=epithelial_cluster_colors, pt.size=2) +
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_blank()
+        )
+
+DimPlot(slingshot_all, reduction = "umap", label=F, cols=epithelial_cluster_colors, pt.size=2) +
+  guides(x = axis, y = axis) +
+  theme(axis.line = element_line(arrow = arrow(length = unit(0.2, "cm"), type="closed")),
+        text = element_text(size = 10),
+        axis.title = element_text(hjust = 0),
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank(),
+        legend.title=element_blank(), legend.position = "right",
+        plot.title = element_blank()
+        )
+
+
+```
+
+## 3.1 Velocity of Subset 1
+
+```{r}
+
+epithelial_subset1 <- RunVelocity(epithelial_subset1,deltaT = 1, kCells = 25, fit.quantile = 0.02)
+
+```
+
+```{r}
+
+
+ident.colors <- epithelial_cluster_colors #(scales::hue_pal())(n = length(x = levels(x = all.combined.vSubset)))
+names(x = ident.colors) <- levels(x = epithelial_subset1)
+cell.colors <- ident.colors[epithelial_subset1$orig_cluster.0.5]
+names(x = cell.colors) <- colnames(x = epithelial_subset1)
+show.velocity.on.embedding.cor(emb = Embeddings(object = epithelial_subset1, reduction = "umap"), 
+                               vel = Tool(object = epithelial_subset1, 
+    slot = "RunVelocity"), n = 200, scale = "sqrt", cell.colors = ac(x = cell.colors, alpha = 0.8), 
+    cex = 0.8, arrow.scale = 3, show.grid.flow = TRUE, min.grid.cell.mass = 0.5, grid.n = 40, arrow.lwd = 2, 
+    do.par = FALSE, cell.border.alpha = 0.1, yaxt="n", xaxt="n", axes = FALSE)
+
+
+```
+
+## 3.2 Slingshot Subset 1
+
+```{r}
+
+slingshot_all <- as.SingleCellExperiment(slingshot_all, assay = 'RNA')
+
+```
+
+```{r}
+slingshot_all_cluster_info <- all.combined.velo$seurat_clusters
+
+slingshot_all<- slingshot::slingshot(slingshot_all, clusterLabels = slingshot_all_cluster_info,reducedDim = "PCA",
+                      allow.breaks = FALSE)
+
+```
+
+```{r}
+
+slingshot_all_lnes <- getLineages(reducedDim(slingshot_all,"PCA"),
+                    slingshot_all_cluster_info)
+
+slingshot_all_lnes@metadata$lineages
+
+```
+
+```{r}
+
+pseudo.paths.all <- slingPseudotime(slingshot_all)
+head(pseudo.paths.all)
+
+```
+
+```{r}
+
+shared.pseudo_all <- rowMeans(pseudo.paths.all, na.rm=TRUE)
+
+# Need to loop over the paths and add each one separately.
+gg_all <- plotUMAP(slingshot_all, colour_by=I(shared.pseudo_all))
+embedded_all <- slingshot::embedCurves(slingshot_all, "UMAP")
+embedded_all <- slingshot::slingCurves(embedded_all)
+for (path in embedded_all) {
+    embedded_all <- data.frame(path$s[path$ord,])
+    gg_all <- gg_all + geom_path(data=embedded_all, aes(x=UMAP_1, y=UMAP_2), size=1.2)
+}
+
+gg_all
+
+```
+
+```{r}
+
+
+# Step 1: Convert factor to data frame with cell IDs and their corresponding values
+factor_df_all <- data.frame(CellID = names(slingshot_all_cluster_info),
+                        FactorValue = as.character(slingshot_all_cluster_info))
+
+# Step 2: Ensure the data frame has row names in a column (if not already)
+pseudo.paths.df_all <- as.data.frame(pseudo.paths.all)
+pseudo.paths.df_all$CellID <- rownames(pseudo.paths.df_all)
+
+# Step 3: Match and merge the factor values into the umap data frame
+# This uses a merge operation to find matching CellIDs and add the FactorValue
+final_df_all <- inner_join(pseudo.paths.df_all, factor_df_all, by = "CellID")
+# The final_df now contains UMAP_1, UMAP_2, and the matched FactorValue for each CellID
+# Optionally, if you want to handle cells in umap_df that don't have a match in cell_factor,
+# you might want to fill NA values in FactorValue column with a default value or handle them as needed.
+
+# View the final data frame to confirm
+head(final_df_all)
+
+# Step 1: Calculate median of Lineage1 for each FactorValue
+factor_order_all <- final_df_all %>%
+  group_by(FactorValue) %>%
+  summarise(MedianLineage1 = median(Lineage1, na.rm = TRUE)) %>%
+  arrange(MedianLineage1) %>%
+  pull(FactorValue)
+
+# Step 2: Convert FactorValue to an ordered factor based on the calculated order
+final_df_all$FactorValue <- factor(final_df_all$FactorValue, levels = factor_order_all)
+
+
+ggplot(final_df_all, aes(x = Lineage1, y = FactorValue, 
+                              colour = FactorValue)) +
+    geom_quasirandom(groupOnX = FALSE, orientation = "y", alpha=0.66) + theme_classic() +
+    xlab("First Slingshot pseudotime") + ylab("cell type") +
+    scale_colour_manual(values = epithelial_cluster_colors)
+
+ggplot(final_df_all, aes(x = Lineage2, y = FactorValue, 
+                              colour = FactorValue)) +
+    geom_quasirandom(groupOnX = FALSE, orientation = "y", alpha=0.66) + theme_classic() +
+    xlab("Second Slingshot pseudotime") + ylab("cell type") +
+    scale_colour_manual(values = epithelial_cluster_colors)
+
+ggplot(final_df_all, aes(x = Lineage3, y = FactorValue, 
+                              colour = FactorValue)) +
+    geom_quasirandom(groupOnX = FALSE, orientation = "y", alpha=0.66) + theme_classic() +
+    xlab("Third Slingshot pseudotime") + ylab("cell type") +
+    scale_colour_manual(values = epithelial_cluster_colors)
+
+ggplot(final_df_all, aes(x = Lineage4, y = FactorValue, 
+                              colour = FactorValue)) +
+    geom_quasirandom(groupOnX = FALSE, orientation = "y", alpha=0.66) + theme_classic() +
+    xlab("Fourth Slingshot pseudotime") + ylab("cell type") +
+    scale_colour_manual(values = epithelial_cluster_colors)
+
+ggplot(final_df_all, aes(x = Lineage5, y = FactorValue, 
+                              colour = FactorValue)) +
+    geom_quasirandom(groupOnX = FALSE, orientation = "y", alpha=0.66) + theme_classic() +
+    xlab("Fifth Slingshot pseudotime") + ylab("cell type") +
+    scale_colour_manual(values = epithelial_cluster_colors)
+
+```
+
+```{r}
+
+n_all <- ncol(slingshot_all)
+L_all <- ncol(slingPseudotime(slingshot_all))
+
+# Extract pseudotime and cluster information
+pseudotime_all <- as.numeric(slingPseudotime(slingshot_all))
+clusters_all <- slingshot_all$orig_cluster.0.5
+
+# Create a data frame for ggplot
+df_all <- data.frame(
+  Pseudotime = pseudotime_all,
+  Lineage = rep(1:L_all, each = length(pseudotime_all) / L_all), # Adjust if you have a different number of cells in each lineage
+  Cluster = factor(clusters_all),
+  Jitter = jitter(rep(1:L_all, each = length(pseudotime_all) / L_all)) # Same adjustment as above
+)
+
+# Create the plot
+all_slingshot_pseudotime_jitter <- ggplot(df_all, aes(x = Pseudotime, y = Jitter, color = Cluster)) +
+  geom_point() +
+  scale_color_manual(values = epithelial_cluster_colors) +
+  theme(legend.text=element_text(size=14)) + labs(colour = "Clusters")  +
+  guides(color = guide_legend(override.aes = list(size = 6))) +
+  theme_classic() +
+  xlab("Pseudotime") +
+  ylab("Lineage") +
+  scale_y_continuous(breaks = function(limits) seq(from = floor(limits[1]), to = ceiling(limits[2]), by = 1)) # Add this line to adjust y breaks
+  ggtitle("Pseudotime Plot")
+
+all_slingshot_pseudotime_jitter  
+  
+```
+
+
+###
+
+# Monocle2
+
+```{r}
+
+library(monocle)
+
+```
+
+# Loading data
+
+```{r}
+
+
+monole2_so <- all.combined.velo
+monole2_so <- subset(x = all.combined.velo, idents = c(0, 1, 3, 4, 5, 9, 2, 7))
+
+```
+
+```{r}
+
+expression_data <- as.matrix(GetAssayData(monole2_so, slot = "counts"))
+
+# Extract phenotype data (metadata)
+pheno_data <- monole2_so@meta.data
+
+# Extract feature data (gene annotations)
+feature_data <- data.frame(gene_short_name = rownames(expression_data))
+
+rownames(feature_data) <- rownames(expression_data)
+
+# Convert phenotype and feature data to AnnotatedDataFrame objects
+phenoData <- new("AnnotatedDataFrame", data = pheno_data)
+featureData <- new("AnnotatedDataFrame", data = feature_data)
+
+# Create the CellDataSet object
+cds <- newCellDataSet(cellData = expression_data,
+                      phenoData = phenoData,
+                      featureData = featureData,
+                      lowerDetectionLimit = 1,
+                      expressionFamily = negbinomial.size())
+
+```
+
+
+```{r}
+
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+
+```
+
+```{r}
+
+#all_markers <- FindAllMarkers(all.combined.velo, only.pos = TRUE, min.pct = 0.3, logfc.threshold = 0.25)
+
+deg <- all_markers[which(all_markers$cluster %in% unique(all.combined.velo$seurat_clusters)), ]
+sel.gene <- unique(deg$gene)
+cds <- monocle::setOrderingFilter(cds, sel.gene)
+
+```
+
+
+```{r}
+
+cds <- monocle::reduceDimension(cds, method = 'DDRTree')
+
+```
+
+
+```{r}
+
+## ordering cells
+cds <- monocle::orderCells(cds)
+
+```
+
+
+```{r}
+
+monocle2_trajectory_plot <- monocle::plot_cell_trajectory(cds, color_by = "seurat_clusters", show_branch_points = F)
+monocle2_trajectory_plot + scale_color_manual(values = epithelial_cluster_colors)
+
+```
+
+```{r}
+
+monocle2_trajectory_plot + scale_color_manual(values = epithelial_cluster_colors) + facet_wrap(~ seurat_clusters)
+
+```
+
+```{r}
+
+monocle::plot_cell_trajectory(cds, color_by = "Pseudotime")
+
+```
+
